@@ -25,12 +25,17 @@ import scenarios
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
 BOTS_PER_WORKER = int(os.environ.get("BOTS_PER_WORKER", "250"))
 WINDOW = int(os.environ.get("INFLIGHT_WINDOW", "32"))   # outstanding orders per bot
-# Open-loop offered rate (orders/sec, this worker) for the latency phase. Keep it
-# below the engine's capacity so latency reflects service time, not queueing.
-OPEN_RATE = float(os.environ.get("OPEN_RATE", "15000"))
+# Offered-load SWEEP (orders/sec, this worker). The open-loop latency phase steps
+# through these rates; the low-load points give clean service-time latency and the
+# high-load points reveal the saturation knee.
+SWEEP_RATES = [int(x) for x in
+               os.environ.get("SWEEP_RATES", "5000,10000,20000,40000,80000").split(",")]
+STEP_SECS = float(os.environ.get("STEP_SECS", "4"))     # seconds per sweep step
+SWEEP_BOTS = int(os.environ.get("SWEEP_BOTS", "120"))   # bot pool for the sweep
 WORKER_ID = os.environ.get("HOSTNAME", socket.gethostname())
 
 CH_CONTROL = "arena:control"
+CH_RUNEVENTS = "arena:runevents"
 STREAM = "arena:samples"
 
 # --- latency histogram (log-spaced microseconds) -------------------------------
@@ -74,12 +79,19 @@ def _build_order(cur):
                 % (cur, cur - random.randint(1, 50)))
 
 
-async def bot(target, stats, stop_event, deadline, mode="closed", rate=0.0):
+class LoadState:
+    """Mutable pacing knob the run loop adjusts while open-loop bots keep running."""
+    def __init__(self):
+        self.interval = 1.0      # per-bot seconds between sends (open-loop)
+
+
+async def bot(target, stats, stop_event, deadline, mode="closed", state=None):
     """One WS bot.
 
     mode="closed": pipelined up to an in-flight window (saturates -> peak TPS).
-    mode="open":   paced at `rate` orders/sec, arrivals independent of acks, so
-                   measured latency reflects true service time, not queue depth.
+    mode="open":   paced at `state.interval` s between sends, arrivals independent
+                   of acks, so measured latency reflects true service time. The pace
+                   is read live so one bot pool can be swept across offered rates.
     """
     try:
         async with websockets.connect(target, ping_interval=None,
@@ -105,19 +117,19 @@ async def bot(target, stats, stop_event, deadline, mode="closed", rate=0.0):
                     # fills ignored by load bots (correctness handled by scenarios)
 
             rx = asyncio.create_task(receiver())
-            interval = (1.0 / rate) if (mode == "open" and rate > 0) else 0.0
             t_next = time.monotonic()
             while not stop_event.is_set() and time.monotonic() < deadline:
                 if mode == "closed":
                     await sem.acquire()
                 else:                              # open-loop: pace arrivals
-                    t_next += interval
+                    t_next += state.interval
                     delay = t_next - time.monotonic()
                     if delay > 0:
                         await asyncio.sleep(delay)
+                    elif delay < -0.5:             # fell behind (saturated): resync
+                        t_next = time.monotonic()  # so we don't build infinite backlog
                     if outstanding >= MAX_OUTSTANDING:
-                        stats.errors += 1          # engine can't keep up: drop
-                        continue
+                        continue                   # saturated: skip (achieved<offered)
                 oid += 1
                 cur = oid
                 msg = _build_order(cur)
@@ -136,22 +148,22 @@ async def bot(target, stats, stop_event, deadline, mode="closed", rate=0.0):
         stats.errors += 1
 
 
-async def reporter(stats, r, stop_event, phase):
-    """Flush per-tick deltas to the Redis Stream for telemetry, tagged by phase.
+async def reporter(stats, r, stop_event, tag):
+    """Flush per-tick deltas to the Redis Stream, tagged with the live phase/rate.
 
-    Baselines start at the phase's beginning, so histogram deltas are scoped to
-    this phase — telemetry uses only the open-loop phase for latency percentiles.
+    `tag` is a dict the caller mutates between sweep steps; baselines start at the
+    reporter's creation so histogram deltas are scoped to the current phase.
     """
     last = dict(sent=stats.sent, acked=stats.acked, errors=stats.errors,
                 corr_pass=stats.corr_pass, corr_total=stats.corr_total)
     last_hist = list(stats.hist)
     while not stop_event.is_set():
         await asyncio.sleep(0.2)
-        await _flush(stats, r, last, last_hist, phase)
-    await _flush(stats, r, last, last_hist, phase)  # final flush
+        await _flush(stats, r, last, last_hist, tag)
+    await _flush(stats, r, last, last_hist, tag)  # final flush
 
 
-async def _flush(stats, r, last, last_hist, phase):
+async def _flush(stats, r, last, last_hist, tag):
     d_sent = stats.sent - last["sent"]
     d_acked = stats.acked - last["acked"]
     d_err = stats.errors - last["errors"]
@@ -169,21 +181,44 @@ async def _flush(stats, r, last, last_hist, phase):
                 corr_pass=stats.corr_pass, corr_total=stats.corr_total)
     await r.xadd(STREAM, {
         "run_id": stats.run_id, "worker": WORKER_ID, "ts": str(time.time()),
-        "phase": phase,
+        "phase": tag["phase"], "rate": str(tag["rate"]),
         "sent": str(d_sent), "acked": str(d_acked), "errors": str(d_err),
         "corr_pass": str(d_cp), "corr_total": str(d_ct),
         "hist": json.dumps(hist_delta),
     }, maxlen=100000, approximate=True)
 
 
-async def run_phase(target, stats, n, duration, mode, rate, r, phase):
-    """Spawn n bots for one phase and report tagged samples."""
+async def run_closed(target, stats, n, duration, r):
+    """Closed-loop saturation phase -> peak TPS."""
     stop_event = asyncio.Event()
     deadline = time.monotonic() + duration + 1
-    tasks = [asyncio.create_task(bot(target, stats, stop_event, deadline, mode, rate))
+    tag = {"phase": "closed", "rate": 0}
+    tasks = [asyncio.create_task(bot(target, stats, stop_event, deadline, "closed"))
              for _ in range(n)]
-    rep = asyncio.create_task(reporter(stats, r, stop_event, phase))
+    rep = asyncio.create_task(reporter(stats, r, stop_event, tag))
     await asyncio.sleep(duration)
+    stop_event.set()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await rep
+
+
+async def run_sweep(target, stats, n, r):
+    """Open-loop offered-load sweep -> latency-vs-throughput curve."""
+    state = LoadState()
+    tag = {"phase": "open", "rate": SWEEP_RATES[0]}
+    stop_event = asyncio.Event()
+    deadline = time.monotonic() + len(SWEEP_RATES) * STEP_SECS + 5
+    tasks = [asyncio.create_task(bot(target, stats, stop_event, deadline, "open", state))
+             for _ in range(n)]
+    rep = asyncio.create_task(reporter(stats, r, stop_event, tag))
+    for rate in SWEEP_RATES:
+        # Settle: apply the new pace but tag rate=0 (telemetry ignores it) so the
+        # step boundary / pacing transient doesn't smear into the measurement.
+        state.interval = max(n, 1) / float(rate)   # per-bot interval for offered `rate`
+        tag["rate"] = 0
+        await asyncio.sleep(1.0)
+        tag["rate"] = rate                          # measure steady state
+        await asyncio.sleep(STEP_SECS)
     stop_event.set()
     await asyncio.gather(*tasks, return_exceptions=True)
     await rep
@@ -191,39 +226,41 @@ async def run_phase(target, stats, n, duration, mode, rate, r, phase):
 
 async def run_load(cfg, r):
     target = cfg["target"]
-    duration = int(cfg["duration"])
-    n = int(cfg.get("bots", BOTS_PER_WORKER))
-    n = min(n, BOTS_PER_WORKER)  # this worker handles up to its share
+    duration = int(cfg["duration"])               # used as the closed-loop phase length
+    n_closed = min(int(cfg.get("bots", BOTS_PER_WORKER)), BOTS_PER_WORKER)
+    n_sweep = min(SWEEP_BOTS, BOTS_PER_WORKER)
     stats = Stats(cfg["run_id"])
     run_id = cfg["run_id"]
+    budget = duration + len(SWEEP_RATES) * int(STEP_SECS) + 60
 
     # Correctness warmup on the clean book — exactly one worker runs it; the rest
     # wait for the done flag so they don't pollute the book mid-probe.
     lock_key = f"arena:scenario:{run_id}"
     done_key = f"arena:scenario_done:{run_id}"
-    if await r.set(lock_key, WORKER_ID, nx=True, ex=duration + 30):
+    if await r.set(lock_key, WORKER_ID, nx=True, ex=budget):
         await scenarios.run(target, stats, iterations=10)
-        await r.set(done_key, "1", ex=duration + 30)
+        await r.set(done_key, "1", ex=budget)
     else:
-        for _ in range(80):                      # wait up to ~8s for the probe
+        for _ in range(80):                       # wait up to ~8s for the probe
             if await r.get(done_key):
                 break
             await asyncio.sleep(0.1)
 
-    # Phase A (closed-loop): saturate to find peak TPS.
-    # Phase B (open-loop):  pace arrivals below capacity to measure true latency.
-    half = max(2, duration // 2)
-    rate_per_bot = max(1.0, OPEN_RATE / max(n, 1))
-    print(f"[bot_fleet:{WORKER_ID}] run {run_id} -> {target} | "
-          f"phase A: {n} bots closed-loop {half}s; "
-          f"phase B: open-loop {OPEN_RATE:.0f} ord/s {duration - half}s", flush=True)
+    print(f"[bot_fleet:{WORKER_ID}] run {run_id} -> {target} | sweep {SWEEP_RATES} "
+          f"ord/s x{STEP_SECS}s ({n_sweep} bots) then closed {duration}s "
+          f"({n_closed} bots)", flush=True)
 
-    await run_phase(target, stats, n, half, "closed", 0.0, r, "closed")
-    await run_phase(target, stats, n, duration - half, "open", rate_per_bot, r, "open")
+    # Sweep FIRST (near-empty book -> clean, fair latency), peak-TPS phase LAST
+    # (its saturation explodes the book, but that no longer pollutes latency).
+    await run_sweep(target, stats, n_sweep, r)
+    await run_closed(target, stats, n_closed, duration, r)
 
     print(f"[bot_fleet:{WORKER_ID}] run {run_id} done: "
           f"sent={stats.sent} acked={stats.acked} errors={stats.errors} "
           f"corr={stats.corr_pass}/{stats.corr_total}", flush=True)
+    # Tell the orchestrator the run is over so it can stop the sandbox.
+    await r.publish(CH_RUNEVENTS, json.dumps({
+        "run_id": run_id, "submission_id": cfg.get("submission_id"), "done": True}))
 
 
 async def main():

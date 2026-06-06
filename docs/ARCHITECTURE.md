@@ -75,16 +75,20 @@ The four required components map 1:1 to four services plus Redis.
 ### bot_fleet (distributed load generator)
 - Each replica subscribes to `arena:control`. On `start`, it runs each load in
   **two phases**:
-  - **Phase A — throughput (closed-loop):** bots pipeline orders up to an
-    in-flight window, saturating the engine to find **peak TPS**.
-  - **Phase B — latency (open-loop):** bots pace arrivals at a fixed offered
-    rate (`OPEN_RATE`, below capacity) independent of acks, so measured latency
-    reflects **true service time, not queue depth** (closed-loop latency is
-    throughput-bound by Little's law: L = λ·W).
-- Per bot, a *sender* emits orders (paced in open-loop) and a *receiver* matches
-  acks back to send-times (interleaved fills drain naturally). Samples are tagged
-  with their phase; telemetry derives latency percentiles from the open-loop
-  phase only and peak TPS from the closed-loop phase.
+  - **Phase 1 — latency sweep (open-loop):** a persistent bot pool paces arrivals
+    through a series of offered rates (`SWEEP_RATES`, e.g. 5k→80k ord/s),
+    independent of acks. This yields the **latency-vs-load curve**: the low-load
+    points are clean service-time latency; where `achieved < offered` and latency
+    explodes is the **saturation knee**. Closed-loop latency would instead be
+    throughput-bound by Little's law (L = λ·W), so we never use it for latency.
+    Runs **first**, on a near-empty book, so the measurement is fair across engines.
+  - **Phase 2 — throughput (closed-loop):** bots pipeline orders up to an
+    in-flight window, saturating the engine to find **peak TPS**. Runs last — its
+    saturation explodes the order book, which no longer pollutes latency.
+- Per bot, a *sender* emits orders (paced in the sweep) and a *receiver* matches
+  acks back to send-times (interleaved fills drain naturally). Each sweep step has
+  a settle sub-window (tagged `rate=0`, ignored) so step boundaries don't smear.
+  Samples carry their phase + offered rate; telemetry bins latency per rate.
 - Order mix: ~85% limit near mid, ~10% market, ~5% cancel.
 - Latency is bucketed into a 256-bin log-spaced histogram; per-tick **deltas**
   (sent/acked/errors/correctness/histogram) are `XADD`-ed to `arena:samples`.
@@ -150,8 +154,10 @@ score = 0.45 · throughput_norm
       − crash_penalty
 
 throughput_norm = min(1, peak_tps / TARGET_TPS)          # TARGET_TPS=100000
-latency_score   = LAT_REF_US / (LAT_REF_US + p99_us)      # LAT_REF_US=500
-                                                          # p99 from open-loop phase
+latency_score   = LAT_REF_US / (LAT_REF_US + p99_us)      # LAT_REF_US=2000
+                                # p99 from the curve point at a FIXED REF_LOAD
+                                # (=10k ord/s) so engines compare apples-to-apples;
+                                # the full curve still shows each engine's own knee
 correctness     = (corr_pass/corr_total) · (acked/sent)   # priority × reliability
 crash_penalty   = 0.3 if reliability < 0.5 else 0
 ```
@@ -200,11 +206,14 @@ contexts are uploaded to the daemon, so no shared host path is required.
   control plane → gRPC.
 - **Persistence/analytics:** land samples in TimescaleDB for historical
   percentiles and per-run drill-down.
-- **Load-generator overhead:** open-loop latency (✅ implemented) is now
-  service-time-based, but absolute values are still inflated by the load
-  generator itself — 250+ asyncio bots in one Python process add ms-scale
-  scheduling latency. Next: a compiled / multi-process load generator, and an
-  offered-load sweep to plot the latency-vs-load curve.
+- **Offered-load sweep + latency-vs-load curve** (✅ implemented). Scoring latency
+  at a fixed reference load makes engines comparable; the curve shows each one's
+  saturation knee. **Finding:** the sweep immediately exposed that the C++ engine
+  via crow.h had **Nagle's algorithm** enabled (25–40 ms latency at low message
+  rates); we patched crow's `SocketAdaptor` to set `TCP_NODELAY` — a real
+  low-latency defect the benchmark caught. Remaining overhead: the Python load
+  generator still adds ms-scale scheduling jitter at the high end; next is a
+  compiled / multi-process generator.
 - **Languages:** Rust/Go submission templates (stubs today).
 - **Scale-out:** multi-host via Docker Swarm (`deploy.replicas` already present)
   or Kubernetes manifests + Terraform for cloud provisioning.

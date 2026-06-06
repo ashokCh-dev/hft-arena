@@ -1003,6 +1003,12 @@ namespace crow
         template<typename F>
         void start(F f)
         {
+            // HFT Arena patch: disable Nagle's algorithm on every accepted
+            // connection. Without TCP_NODELAY, small ack packets are held ~25-40ms
+            // at low message rates (Nagle/delayed-ACK), which is fatal for an HFT
+            // matching engine. Any serious low-latency engine must set this.
+            error_code ec;
+            socket_.set_option(tcp::no_delay(true), ec);
             f(error_code());
         }
 

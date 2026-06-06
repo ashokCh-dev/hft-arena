@@ -39,7 +39,8 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       TARGET_TPS: "100000"     # peak TPS that earns the full throughput sub-score
-      LAT_REF_US: "500"        # p99 latency reference for the latency sub-score
+      LAT_REF_US: "2000"       # p99 reference for the latency sub-score (at REF_LOAD)
+      REF_LOAD: "10000"        # fixed offered load (ord/s) latency is scored at
     depends_on:
       redis:
         condition: service_healthy
@@ -49,8 +50,10 @@ services:
     build: ./bot_fleet
     environment:
       REDIS_URL: redis://redis:6379
-      BOTS_PER_WORKER: "250"   # async bots each replica spawns per run
-      OPEN_RATE: "15000"       # open-loop offered rate (ord/s/worker) for the latency phase
+      BOTS_PER_WORKER: "250"   # async bots each replica spawns per run (closed phase)
+      SWEEP_RATES: "5000,10000,20000,40000,80000"  # open-loop offered-load sweep (ord/s)
+      STEP_SECS: "4"           # seconds per sweep step
+      SWEEP_BOTS: "120"        # bot pool size during the sweep
     depends_on:
       redis:
         condition: service_healthy

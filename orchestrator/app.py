@@ -21,6 +21,7 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 
 CH_CONTROL = "arena:control"   # orchestrator -> bot_fleet
 CH_EVENTS = "arena:events"     # telemetry/orchestrator -> dashboard
+CH_RUNEVENTS = "arena:runevents"  # bot_fleet -> orchestrator (run finished)
 KEY_SNAPSHOT = "arena:snapshot"
 
 app = FastAPI(title="HFT Arena Orchestrator")
@@ -33,6 +34,20 @@ r: aioredis.Redis = None
 async def _startup():
     global r
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
+    asyncio.create_task(_runevents_listener())
+
+
+async def _runevents_listener():
+    """Stop a submission's sandbox once the bot fleet reports the run is done."""
+    pubsub = r.pubsub()
+    await pubsub.subscribe(CH_RUNEVENTS)
+    async for m in pubsub.listen():
+        if m.get("type") != "message":
+            continue
+        ev = json.loads(m["data"])
+        if ev.get("done") and ev.get("submission_id"):
+            await asyncio.to_thread(sandbox.stop, ev["submission_id"])
+            await publish_event({"status": "Run complete.", "running": False})
 
 
 async def publish_event(payload: dict):
@@ -104,8 +119,9 @@ async def start_run(req: RunReq):
         "submission_id": req.submission_id, "target": target,
         "bots": req.bots, "duration": req.duration,
     }))
-    # Auto-stop the sandbox after the run window elapses.
-    asyncio.create_task(_auto_stop(req.submission_id, req.duration + 5, name))
+    # Primary stop is the fleet's run-done event; this is a generous safety net
+    # in case a worker dies mid-run (the open-loop sweep makes run length dynamic).
+    asyncio.create_task(_auto_stop(req.submission_id, req.duration + 180, name))
     return {"run_id": run_id, "target": target, "bots": req.bots,
             "duration": req.duration}
 
@@ -113,7 +129,6 @@ async def start_run(req: RunReq):
 async def _auto_stop(submission_id: str, after: int, name: str):
     await asyncio.sleep(after)
     await asyncio.to_thread(sandbox.stop, submission_id)
-    await publish_event({"status": f"Run complete for {name}.", "running": False})
 
 
 @app.post("/stop")

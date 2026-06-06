@@ -3,9 +3,11 @@
 # leaderboard. Usage: ./scripts/demo.sh [python|cpp] [bots] [duration]
 set -euo pipefail
 
+# DURATION = closed-loop (peak-TPS) phase length; an open-loop offered-load sweep
+# (SWEEP_RATES x STEP_SECS, ~20s by default) then runs automatically after it.
 LANG_SEL="${1:-python}"
-BOTS="${2:-500}"
-DURATION="${3:-30}"
+BOTS="${2:-400}"
+DURATION="${3:-8}"
 BASE="http://localhost:8000"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -34,6 +36,6 @@ docker ps --filter "name=arena-sub-$SUBMISSION_ID" --format \
   'table {{.Names}}\t{{.Status}}\t{{.Image}}' || true
 
 echo ""
-echo "==> Open http://localhost:8000 to watch the live leaderboard."
-echo "    Tailing telemetry for ${DURATION}s…"
-timeout "$((DURATION+3))" docker compose logs -f --tail=0 bot_fleet telemetry || true
+echo "==> Open http://localhost:8000 to watch the live leaderboard + latency curve."
+echo "    Closed-loop phase (${DURATION}s) then open-loop offered-load sweep…"
+timeout "$((DURATION+40))" docker compose logs -f --tail=0 bot_fleet || true

@@ -60,14 +60,16 @@ formula, and roadmap.
 
 Both reference engines run through the complete pipeline with the sandbox
 enforcing 2 pinned CPUs / 512 MB / 256 pids / read-only / all-caps-dropped.
-Each run is **two-phase**: closed-loop to find **peak TPS**, then open-loop
-(paced below capacity) to measure **true latency** at equal offered load:
+Each run does an **open-loop offered-load sweep** (5k→80k ord/s, clean book) for
+the latency-vs-load curve, then a **closed-loop** phase for peak TPS. Latency is
+scored at a fixed reference load (10k ord/s) so engines compare apples-to-apples:
 
-| Submission | Peak TPS | p50 (open-loop) | p99 (open-loop) | Correctness | Score |
-|---|---|---|---|---|---|
-| cpp-engine | ~72k | ~18 ms | ~23 ms | 1.00 | 531 |
-| python-engine | ~47k | ~35 ms | ~70 ms | 0.99 | 412 |
+| Submission | Peak TPS | Sustains | p50 @10k | p99 @10k | Correctness | Score |
+|---|---|---|---|---|---|---|
+| cpp-engine | ~88k | 80k ord/s | **0.8 ms** | 2.2 ms | 1.00 | **762** |
+| python-engine | ~40k | 20k ord/s | 2.2 ms | 23 ms | 0.90 | 387 |
 
-Open-loop latency cleanly separates the engines at equal load (C++ ~2× faster
-on both throughput and tail latency). Absolute latency is still inflated by the
-Python load generator's own scheduling overhead — see the roadmap.
+C++ wins decisively on throughput **and** latency. The sweep also caught a real
+bug: crow.h had **Nagle's algorithm** on (25–40 ms latency at low rates) — we
+patched `SocketAdaptor` to set `TCP_NODELAY`. The dashboard plots each engine's
+latency-vs-load curve live; the saturation knee is visible at the high end.

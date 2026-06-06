@@ -57,6 +57,8 @@ async def sample_consumer(r):
                     int(fields.get("corr_total", 0)),
                     json.loads(fields.get("hist", "[]")),
                     fields.get("phase", "open"),
+                    int(fields.get("rate", 0)),
+                    float(fields.get("ts", 0.0)),
                 )
 
 
@@ -64,14 +66,12 @@ async def publisher(r):
     """Every 500ms, push the ranked leaderboard snapshot to the dashboard."""
     while True:
         await asyncio.sleep(0.5)
-        rows = []
+        # Show each submission's LATEST snapshot. The score legitimately evolves
+        # as the offered-load sweep progresses (and settles once the run ends), so
+        # "best score ever" would freeze an early, incomplete curve — we want the
+        # final, complete one. Most-recent run wins (RUNS preserves insert order).
         for agg in RUNS.values():
-            snap = agg.snapshot()
-            rows.append(snap)
-            prev = BEST.get(snap["submission"])
-            if prev is None or snap["score"] >= prev["score"]:
-                BEST[snap["submission"]] = snap
-        # Rank by the best score seen per submission, latest run details shown.
+            BEST[agg.submission] = agg.snapshot()
         ranked = sorted(BEST.values(), key=lambda s: s["score"], reverse=True)
         if not ranked:
             continue
