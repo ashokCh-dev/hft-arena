@@ -1,0 +1,64 @@
+# HFT Arena — Distributed Benchmarking & Hosting Platform
+# This compose file IS our Infrastructure-as-Code for the single-host vertical slice.
+# `deploy.replicas` keys make it Docker Swarm compatible (see docs/ARCHITECTURE.md).
+name: hft-arena
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: arena-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks: [arena_net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    container_name: arena-orchestrator
+    ports:
+      - "8000:8000"
+    volumes:
+      # Lets the orchestrator drive the host Docker daemon to sandbox submissions.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      REDIS_URL: redis://redis:6379
+      ARENA_NETWORK: arena_net
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [arena_net]
+
+  telemetry:
+    build: ./telemetry
+    container_name: arena-telemetry
+    environment:
+      REDIS_URL: redis://redis:6379
+      TARGET_TPS: "100000"     # peak TPS that earns the full throughput sub-score
+      LAT_REF_US: "500"        # p99 latency reference for the latency sub-score
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [arena_net]
+
+  bot_fleet:
+    build: ./bot_fleet
+    environment:
+      REDIS_URL: redis://redis:6379
+      BOTS_PER_WORKER: "250"   # async bots each replica spawns per run
+      OPEN_RATE: "15000"       # open-loop offered rate (ord/s/worker) for the latency phase
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [arena_net]
+    deploy:
+      replicas: 1              # scale with: docker compose up --scale bot_fleet=3
+
+networks:
+  arena_net:
+    name: arena_net           # fixed name so orchestrator-launched sandboxes can join
+    driver: bridge

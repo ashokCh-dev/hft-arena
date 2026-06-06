@@ -1,0 +1,6 @@
+# Extracted reference scratch (binaries/objects from hft_arena.zip)
+reference/
+# Python
+__pycache__/
+*.pyc
+.env

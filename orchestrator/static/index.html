@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HFT Arena — Live Leaderboard</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#c9d1d9;
+          --accent:#3fb950; --blue:#79c0ff; --amber:#f2cc60; --red:#f85149; }
+  * { box-sizing: border-box; }
+  body { background:var(--bg); color:var(--fg); font-family:ui-monospace,Menlo,Consolas,monospace;
+         margin:0; padding:24px; max-width:1100px; margin:0 auto; }
+  h1 { font-size:1.5em; } h1 small { color:var(--blue); font-weight:normal; font-size:.6em; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; }
+  textarea { width:100%; height:160px; background:#0b0f14; color:var(--blue);
+             border:1px solid var(--border); border-radius:6px; padding:10px; font-family:inherit; }
+  select, input { background:#0b0f14; color:var(--fg); border:1px solid var(--border);
+                  border-radius:6px; padding:8px; font-family:inherit; }
+  button { background:var(--accent); color:#04240f; padding:10px 20px; cursor:pointer;
+           font-weight:bold; border:none; border-radius:6px; }
+  button.secondary { background:#21262d; color:var(--fg); border:1px solid var(--border); }
+  .controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+  .stat { flex:1; min-width:130px; }
+  .stat .v { font-size:1.8em; color:var(--accent); font-weight:bold; }
+  .stat .l { color:#8b949e; font-size:.8em; text-transform:uppercase; letter-spacing:.05em; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; }
+  th,td { text-align:right; padding:8px 10px; border-bottom:1px solid var(--border); }
+  th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){ text-align:left; }
+  th { color:#8b949e; font-weight:normal; font-size:.8em; }
+  tr.lead td { color:var(--accent); }
+  #status { color:var(--amber); }
+  .pill { display:inline-block; width:9px; height:9px; border-radius:50%; background:#8b949e; margin-right:6px; }
+  .pill.live { background:var(--accent); box-shadow:0 0 8px var(--accent); }
+</style>
+</head>
+<body>
+  <h1>🚀 HFT Arena <small>Distributed Benchmarking &amp; Hosting Platform</small></h1>
+  <div class="panel">
+    <div><span class="pill" id="pill"></span><b>Status:</b> <span id="status">Connecting…</span></div>
+    <textarea id="code" spellcheck="false">// Click "Load Python reference" or paste your matching engine source…</textarea>
+    <div class="controls">
+      <label>Language
+        <select id="lang">
+          <option value="python">python</option>
+          <option value="cpp">cpp</option>
+        </select>
+      </label>
+      <label>Bots <input id="bots" type="number" value="250" style="width:90px"></label>
+      <label>Duration s <input id="dur" type="number" value="30" style="width:70px"></label>
+      <button onclick="loadSample()" class="secondary">Load Python reference</button>
+      <button onclick="deploy()">Deploy &amp; Attack</button>
+      <button onclick="stopRun()" class="secondary">Stop</button>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:16px">
+    <div class="panel stat"><div class="v" id="m_score">0</div><div class="l">Top Score</div></div>
+    <div class="panel stat"><div class="v" id="m_tps">0</div><div class="l">TPS (peak)</div></div>
+    <div class="panel stat"><div class="v" id="m_p50">0</div><div class="l">p50 µs (open-loop)</div></div>
+    <div class="panel stat"><div class="v" id="m_p99">0</div><div class="l">p99 µs (open-loop)</div></div>
+    <div class="panel stat"><div class="v" id="m_corr">100%</div><div class="l">Correctness</div></div>
+  </div>
+
+  <div class="panel" style="margin-top:16px">
+    <b>Leaderboard</b>
+    <span style="color:#8b949e;font-size:.8em"> — Peak TPS measured closed-loop (saturation); latency measured open-loop (paced below capacity)</span>
+    <table>
+      <thead><tr>
+        <th>#</th><th>Submission</th><th>Score</th><th>Peak TPS</th>
+        <th>p50 µs</th><th>p90 µs</th><th>p99 µs</th>
+        <th>Correctness</th><th>Sent</th><th>Errors</th>
+      </tr></thead>
+      <tbody id="lb"></tbody>
+    </table>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+async function loadSample() {
+  const r = await fetch('/static/sample_python.txt');
+  $('code').value = await r.text();
+  $('lang').value = 'python';
+}
+
+async function deploy() {
+  $('status').innerText = 'Submitting…';
+  const sub = await (await fetch('/submissions', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ language:$('lang').value, code:$('code').value, name:$('lang').value+'-engine' })
+  })).json();
+  if (sub.error || !sub.submission_id) { $('status').innerText = 'Build error: '+(sub.error||'unknown'); return; }
+  await fetch('/runs', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ submission_id:sub.submission_id, bots:+$('bots').value, duration:+$('dur').value })
+  });
+}
+
+function stopRun(){ fetch('/stop', {method:'POST'}); }
+
+function fmt(n){ return (n>=1000? (n/1000).toFixed(1)+'k' : n); }
+
+function render(d) {
+  if (d.status !== undefined) {
+    $('status').innerText = d.status;
+    $('pill').className = 'pill' + (d.running ? ' live' : '');
+  }
+  if (d.type === 'leaderboard') {
+    const rows = d.rows || [];
+    const tb = $('lb'); tb.innerHTML = '';
+    rows.forEach((r,i) => {
+      const tr = document.createElement('tr');
+      if (i===0) tr.className='lead';
+      tr.innerHTML = `<td>${i+1}</td><td>${r.submission}</td><td>${r.score}</td>
+        <td>${fmt(r.peak_tps)}</td><td>${r.p50_us}</td><td>${r.p90_us}</td><td>${r.p99_us}</td>
+        <td>${(r.correctness*100).toFixed(1)}%</td><td>${fmt(r.sent)}</td><td>${r.errors}</td>`;
+      tb.appendChild(tr);
+    });
+    if (rows[0]) {
+      const r = rows[0];
+      $('m_score').innerText = r.score;
+      $('m_tps').innerText = fmt(r.peak_tps);
+      $('m_p50').innerText = r.p50_us;
+      $('m_p99').innerText = r.p99_us;
+      $('m_corr').innerText = (r.correctness*100).toFixed(1)+'%';
+    }
+  }
+}
+
+function connect() {
+  const ws = new WebSocket('ws://' + location.host + '/ws/leaderboard');
+  ws.onopen = () => { $('status').innerText = 'Ready'; };
+  ws.onmessage = e => render(JSON.parse(e.data));
+  ws.onclose = () => { $('status').innerText = 'Disconnected — retrying…'; setTimeout(connect, 1500); };
+}
+connect();
+</script>
+</body>
+</html>
