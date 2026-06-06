@@ -3,7 +3,7 @@
 **Distributed Benchmarking & Hosting Platform** for contestant-submitted trading
 infrastructure — IICPC Summer Hackathon 2026.
 
-Contestants upload a matching engine; HFT Arena securely containerizes it,
+We upload a matching engine; HFT Arena securely containerizes it,
 unleashes a distributed fleet of trading bots, measures latency / throughput /
 correctness, and streams a live ranked leaderboard.
 
