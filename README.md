@@ -1,4 +1,4 @@
-# 🚀 HFT Arena
+# HFT Arena
 
 **Distributed Benchmarking & Hosting Platform** for contestant-submitted trading
 infrastructure — IICPC Summer Hackathon 2026.
