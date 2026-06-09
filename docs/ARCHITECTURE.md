@@ -213,8 +213,19 @@ with (verified via `docker inspect`):
 | non-root `USER runner` | in template | container-as-root risks |
 | dedicated bridge `arena_net` | isolated | lateral movement; only the fleet reaches it |
 
-The orchestrator drives the host Docker daemon via the mounted socket; build
-contexts are uploaded to the daemon, so no shared host path is required.
+**Two interchangeable sandbox backends** (selected by `SANDBOX_BACKEND`), same
+isolation either way:
+- `docker` (`sandbox.py`) — builds a per-submission image from source and
+  `docker run`s it via the mounted socket; isolation as CLI flags.
+- `k8s` (`sandbox_k8s.py`) — creates an isolated **Pod per submission via the
+  Kubernetes API**; isolation as pod spec (`resources.limits`, `securityContext`:
+  `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation:false`,
+  `capabilities.drop:[ALL]`, `seccompProfile:RuntimeDefault`, SA token off). The
+  bot fleet reaches the submission at the Pod IP. **Verified end-to-end on a k3d
+  cluster:** submit → Pod created via API → 2 coordinated fleet replicas load it →
+  scored leaderboard → Pod auto-stopped. (In-cluster source→image builds via
+  Kaniko are the remaining piece; today the k8s backend runs a prebuilt reference
+  image.) RBAC for it is in `k8s/orchestrator.yaml`.
 
 ### Adversarial verification (`tests/adversarial.sh`)
 The Sandboxing + Validation defenses are continuously tested against hostile
@@ -254,9 +265,13 @@ submissions, all verified green:
   coordinated 1/N load splitting (above). Three IaC layers ship: `docker-compose.yml`
   (single host, Swarm-compatible `deploy.replicas`), `k8s/` (kustomize: Deployments,
   Services, RBAC, and a bot-fleet **HPA**), and `terraform/` (GKE cluster + autoscaling
-  node pool). Next: have the orchestrator provision sandboxes via the Kubernetes API
-  (Job/Pod per submission with the same isolation as pod spec) instead of the Docker
-  socket — RBAC for it is already in `k8s/orchestrator.yaml`.
+  node pool). The whole platform was deployed to a **k3d cluster** and a full run
+  verified in-cluster.
+- **K8s-native sandboxing** (✅ implemented). The orchestrator provisions each
+  submission as an isolated **Pod via the Kubernetes API** (`sandbox_k8s.py`,
+  `SANDBOX_BACKEND=k8s`) instead of the Docker socket. Next: in-cluster source→image
+  builds via **Kaniko** so uploaded source (not just a prebuilt image) is built in
+  the cluster.
 - **Languages:** Rust/Go submission templates (stubs today).
 - **Hardening:** gVisor/Firecracker microVMs, seccomp profiles, egress controls,
   per-submission build caching, auth.

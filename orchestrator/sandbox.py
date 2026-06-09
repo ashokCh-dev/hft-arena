@@ -31,6 +31,11 @@ def container_name(submission_id: str) -> str:
     return f"arena-sub-{submission_id}"
 
 
+def target_host(submission_id: str) -> str:
+    """Where the bot fleet reaches this submission (container DNS name on arena_net)."""
+    return container_name(submission_id)
+
+
 def image_tag(submission_id: str) -> str:
     return f"arena-sub-{submission_id}:latest"
 
@@ -54,7 +59,7 @@ def build_image(submission_id: str, language: str, code: str) -> str:
         shutil.rmtree(ctx, ignore_errors=True)
 
 
-def launch(submission_id: str):
+def launch(submission_id: str, language: str = None):
     """Run the built image with strict isolation. Returns the container."""
     name = container_name(submission_id)
     _remove_if_exists(name)

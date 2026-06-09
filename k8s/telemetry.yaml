@@ -14,6 +14,7 @@ spec:
       containers:
         - name: telemetry
           image: hft-arena/telemetry:latest    # set in kustomization.yaml
+          imagePullPolicy: IfNotPresent
           env:
             - { name: REDIS_URL,  value: "redis://redis:6379" }
             - { name: TARGET_TPS, value: "100000" }

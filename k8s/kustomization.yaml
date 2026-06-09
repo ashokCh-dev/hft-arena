@@ -9,17 +9,18 @@ resources:
   - bot-fleet.yaml
   - orchestrator.yaml
 
-# Point these at your registry after `docker compose build` + push, e.g.:
-#   docker tag hft-arena-orchestrator REG/hft-arena/orchestrator:v1 && docker push ...
+# Defaults to the images built by `docker compose build` (import them into a local
+# cluster with `k3d image import`). For a cloud registry, retag/push and change
+# newName to e.g. ghcr.io/<you>/hft-arena-orchestrator.
 images:
   - name: hft-arena/orchestrator
-    newName: ghcr.io/ashokch-dev/hft-arena-orchestrator
+    newName: hft-arena-orchestrator
     newTag: latest
   - name: hft-arena/telemetry
-    newName: ghcr.io/ashokch-dev/hft-arena-telemetry
+    newName: hft-arena-telemetry
     newTag: latest
   - name: hft-arena/bot-fleet
-    newName: ghcr.io/ashokch-dev/hft-arena-bot-fleet
+    newName: hft-arena-bot_fleet
     newTag: latest
 
 commonLabels:

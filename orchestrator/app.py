@@ -14,7 +14,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import redis.asyncio as aioredis
 
-import sandbox
+# Sandbox backend: "docker" (build+run via socket) or "k8s" (Pod via the K8s API).
+if os.environ.get("SANDBOX_BACKEND") == "k8s":
+    import sandbox_k8s as sandbox
+else:
+    import sandbox
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
 STATIC = os.path.join(os.path.dirname(__file__), "static")
@@ -109,15 +113,16 @@ async def start_run(req: RunReq):
     name = meta.get("name", req.submission_id)
     run_id = uuid.uuid4().hex[:8]
 
+    lang = meta.get("language", "python")
     await publish_event({"status": f"Deploying sandbox for {name}…"})
-    await asyncio.to_thread(sandbox.launch, req.submission_id)
+    await asyncio.to_thread(sandbox.launch, req.submission_id, lang)
     healthy = await asyncio.to_thread(sandbox.wait_healthy, req.submission_id)
     if not healthy:
         tail = await asyncio.to_thread(sandbox.logs, req.submission_id)
         await publish_event({"status": f"Sandbox failed health check. logs: {tail[:200]}"})
         return {"error": "sandbox unhealthy"}, 500
 
-    target = f"ws://{sandbox.container_name(req.submission_id)}:9000"
+    target = f"ws://{sandbox.target_host(req.submission_id)}:9000"
     # Tell telemetry which run/submission is live, then start the bot fleet.
     await publish_event({"status": f"Attacking {name}…", "running": True,
                          "submission": name})

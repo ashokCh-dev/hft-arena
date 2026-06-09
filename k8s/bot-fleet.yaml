@@ -14,6 +14,7 @@ spec:
       containers:
         - name: bot-fleet
           image: hft-arena/bot-fleet:latest     # set in kustomization.yaml
+          imagePullPolicy: IfNotPresent
           env:
             - { name: REDIS_URL,       value: "redis://redis:6379" }
             - { name: BOTS_PER_WORKER, value: "250" }

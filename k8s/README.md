@@ -4,13 +4,20 @@ These manifests deploy the platform's **stateless services** to Kubernetes and
 demonstrate horizontal scaling of the distributed load generator. They are the
 cloud-native counterpart to the single-host `docker-compose.yml`.
 
-```
-kubectl apply -k k8s/                 # deploy everything (kustomize)
-kubectl -n hft-arena get pods
+### Verified locally on k3d
+```bash
+k3d cluster create arena
+docker compose build                                   # build platform images
+k3d image import hft-arena-orchestrator:latest hft-arena-telemetry:latest \
+    hft-arena-bot_fleet:latest arena-ref-py:latest -c arena
+kubectl apply -k k8s/                                  # deploy (kustomize)
+kubectl -n hft-arena get pods                          # redis, orchestrator, telemetry, bot-fleet x2
 kubectl -n hft-arena scale deploy/bot-fleet --replicas=8   # scale the load fleet
-kubectl -n hft-arena port-forward svc/orchestrator 8000:8000
-# open http://localhost:8000
+kubectl -n hft-arena port-forward svc/orchestrator 8000:8000   # open http://localhost:8000
 ```
+A submit→run then creates an isolated **submission Pod via the K8s API**
+(`SANDBOX_BACKEND=k8s`), which the in-cluster bot fleet bombards — verified
+end-to-end (score, latency curve, auto-stop).
 
 ## What's here
 | File | Resource |
@@ -27,16 +34,18 @@ offers `1/N` of the swept load), so scaling `replicas` raises aggregate
 throughput **without** distorting the latency-vs-load curve — the same mechanism
 that works under `docker compose --scale bot_fleet=N`.
 
-## Sandbox provisioning on Kubernetes (design note)
-On a single host the orchestrator sandboxes submissions via the Docker socket.
-On Kubernetes that path is replaced by the **Kubernetes API**: the orchestrator
-creates a short-lived `Job`/`Pod` per submission with the same isolation guarantees
-expressed as pod spec —
-`resources.limits` (CPU/memory), `securityContext`
-(`runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`,
-`capabilities.drop: [ALL]`), a restrictive `seccompProfile`, and a dedicated
-`NetworkPolicy` so only the bot fleet can reach the submission. CPU pinning maps
-to the `static` CPU manager policy / Guaranteed QoS. Building images moves to an
-in-cluster builder (BuildKit/Kaniko) pushing to a registry. This is the next
-implementation step; the manifests here cover the always-on platform tier.
-See `../terraform/` for provisioning the cluster itself.
+## Sandbox provisioning on Kubernetes (implemented)
+On a single host the orchestrator sandboxes submissions via the Docker socket. On
+Kubernetes (`SANDBOX_BACKEND=k8s`, see `orchestrator/sandbox_k8s.py`) it instead
+creates a **Pod per submission via the Kubernetes API**, with the same isolation
+expressed as pod spec: `resources.limits` (CPU/memory), `securityContext`
+(`runAsNonRoot`, `runAsUser:65532`, `readOnlyRootFilesystem`,
+`allowPrivilegeEscalation:false`, `capabilities.drop:[ALL]`,
+`seccompProfile:RuntimeDefault`), and `automountServiceAccountToken:false`. The
+bot fleet reaches it at the Pod IP. CPU pinning maps to the node's `static` CPU
+manager policy / Guaranteed QoS (see `../terraform/`).
+
+**Remaining:** building the image from uploaded source moves to an in-cluster
+builder (BuildKit/**Kaniko**) pushing to a registry; today the k8s backend runs a
+prebuilt reference image. A `NetworkPolicy` restricting submission egress to only
+the bot fleet is also a quick follow-up. See `../terraform/` for the cluster itself.
