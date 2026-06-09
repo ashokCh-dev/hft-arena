@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: hft-arena
+
+resources:
+  - namespace.yaml
+  - redis.yaml
+  - telemetry.yaml
+  - bot-fleet.yaml
+  - orchestrator.yaml
+
+# Point these at your registry after `docker compose build` + push, e.g.:
+#   docker tag hft-arena-orchestrator REG/hft-arena/orchestrator:v1 && docker push ...
+images:
+  - name: hft-arena/orchestrator
+    newName: ghcr.io/ashokch-dev/hft-arena-orchestrator
+    newTag: latest
+  - name: hft-arena/telemetry
+    newName: ghcr.io/ashokch-dev/hft-arena-telemetry
+    newTag: latest
+  - name: hft-arena/bot-fleet
+    newName: ghcr.io/ashokch-dev/hft-arena-bot-fleet
+    newTag: latest
+
+commonLabels:
+  app.kubernetes.io/part-of: hft-arena

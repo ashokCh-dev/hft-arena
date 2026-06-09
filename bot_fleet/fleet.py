@@ -202,22 +202,30 @@ async def run_closed(target, stats, n, duration, r):
     await rep
 
 
-async def run_sweep(target, stats, n, r):
-    """Open-loop offered-load sweep -> latency-vs-throughput curve."""
+async def run_sweep(target, stats, n, r, fleet_n=1):
+    """Open-loop offered-load sweep -> latency-vs-throughput curve.
+
+    Under horizontal scaling the offered load is split across `fleet_n` workers:
+    each worker offers `rate / fleet_n` so the AGGREGATE offered load equals the
+    `rate` label that every worker tags. Telemetry sums across workers, so the
+    curve's x-axis stays the true aggregate offered load.
+    """
     state = LoadState()
     tag = {"phase": "open", "rate": SWEEP_RATES[0]}
     stop_event = asyncio.Event()
-    deadline = time.monotonic() + len(SWEEP_RATES) * STEP_SECS + 5
+    deadline = time.monotonic() + len(SWEEP_RATES) * (STEP_SECS + 1) + 5
     tasks = [asyncio.create_task(bot(target, stats, stop_event, deadline, "open", state))
              for _ in range(n)]
     rep = asyncio.create_task(reporter(stats, r, stop_event, tag))
     for rate in SWEEP_RATES:
+        # This worker's share of the aggregate offered rate; per-bot interval.
+        share = rate / float(fleet_n)
         # Settle: apply the new pace but tag rate=0 (telemetry ignores it) so the
         # step boundary / pacing transient doesn't smear into the measurement.
-        state.interval = max(n, 1) / float(rate)   # per-bot interval for offered `rate`
+        state.interval = max(n, 1) / max(share, 1.0)
         tag["rate"] = 0
         await asyncio.sleep(1.0)
-        tag["rate"] = rate                          # measure steady state
+        tag["rate"] = rate                          # tag with the AGGREGATE rate
         await asyncio.sleep(STEP_SECS)
     stop_event.set()
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -233,34 +241,46 @@ async def run_load(cfg, r):
     run_id = cfg["run_id"]
     budget = duration + len(SWEEP_RATES) * int(STEP_SECS) + 60
 
+    # Fleet barrier: every participating replica registers, then we read the count
+    # so the offered-load sweep can be split into equal shares (correct distribution
+    # under `docker compose --scale` / a K8s Deployment with >1 replica).
+    fleet_key = f"arena:fleet:{run_id}"
+    await r.sadd(fleet_key, WORKER_ID)
+    await r.expire(fleet_key, budget)
+
     # Correctness warmup on the clean book — exactly one worker runs it; the rest
     # wait for the done flag so they don't pollute the book mid-probe.
     lock_key = f"arena:scenario:{run_id}"
     done_key = f"arena:scenario_done:{run_id}"
-    if await r.set(lock_key, WORKER_ID, nx=True, ex=budget):
+    is_leader = bool(await r.set(lock_key, WORKER_ID, nx=True, ex=budget))
+    if is_leader:
+        await asyncio.sleep(1.5)                  # barrier: let all replicas register
         await scenarios.run(target, stats, iterations=10)
         await r.set(done_key, "1", ex=budget)
     else:
-        for _ in range(80):                       # wait up to ~8s for the probe
+        for _ in range(120):                      # wait up to ~12s for the probe
             if await r.get(done_key):
                 break
             await asyncio.sleep(0.1)
 
-    print(f"[bot_fleet:{WORKER_ID}] run {run_id} -> {target} | sweep {SWEEP_RATES} "
-          f"ord/s x{STEP_SECS}s ({n_sweep} bots) then closed {duration}s "
-          f"({n_closed} bots)", flush=True)
+    fleet_n = max(1, int(await r.scard(fleet_key)))
+    print(f"[bot_fleet:{WORKER_ID}] run {run_id} -> {target} | fleet={fleet_n} | "
+          f"sweep {SWEEP_RATES} ord/s x{STEP_SECS}s ({n_sweep} bots/worker) then "
+          f"closed {duration}s ({n_closed} bots/worker)", flush=True)
 
     # Sweep FIRST (near-empty book -> clean, fair latency), peak-TPS phase LAST
     # (its saturation explodes the book, but that no longer pollutes latency).
-    await run_sweep(target, stats, n_sweep, r)
+    await run_sweep(target, stats, n_sweep, r, fleet_n)
     await run_closed(target, stats, n_closed, duration, r)
 
     print(f"[bot_fleet:{WORKER_ID}] run {run_id} done: "
           f"sent={stats.sent} acked={stats.acked} errors={stats.errors} "
           f"corr={stats.corr_pass}/{stats.corr_total}", flush=True)
-    # Tell the orchestrator the run is over so it can stop the sandbox.
-    await r.publish(CH_RUNEVENTS, json.dumps({
-        "run_id": run_id, "submission_id": cfg.get("submission_id"), "done": True}))
+    # Only the leader signals run-done, so a fast replica can't stop the sandbox
+    # out from under stragglers still draining their final orders.
+    if is_leader:
+        await r.publish(CH_RUNEVENTS, json.dumps({
+            "run_id": run_id, "submission_id": cfg.get("submission_id"), "done": True}))
 
 
 async def main():

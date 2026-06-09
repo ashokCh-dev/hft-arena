@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry
+  namespace: hft-arena
+spec:
+  replicas: 1                 # single consumer of the metrics stream (aggregator)
+  selector:
+    matchLabels: { app: telemetry }
+  template:
+    metadata:
+      labels: { app: telemetry }
+    spec:
+      containers:
+        - name: telemetry
+          image: hft-arena/telemetry:latest    # set in kustomization.yaml
+          env:
+            - { name: REDIS_URL,  value: "redis://redis:6379" }
+            - { name: TARGET_TPS, value: "100000" }
+            - { name: LAT_REF_US, value: "2000" }
+            - { name: REF_LOAD,   value: "10000" }
+          resources:
+            requests: { cpu: "250m", memory: "128Mi" }
+            limits:   { cpu: "2",    memory: "512Mi" }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

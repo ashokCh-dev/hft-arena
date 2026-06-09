@@ -90,6 +90,15 @@ The four required components map 1:1 to four services plus Redis.
   a settle sub-window (tagged `rate=0`, ignored) so step boundaries don't smear.
   Samples carry their phase + offered rate; telemetry bins latency per rate.
 - Order mix: ~85% limit near mid, ~10% market, ~5% cancel.
+- **Horizontal scaling (coordinated):** on run start every replica registers in a
+  Redis set keyed on `run_id` (a barrier); each then offers `rate / N` of the
+  swept load, so the **aggregate** offered load equals the tagged rate no matter
+  how many replicas run. One replica is elected leader (the scenario-lock holder)
+  to run the correctness probe and emit the run-done event. Measured: 1→3 replicas
+  took peak load from ~91k to ~180k ord/s — enough to find the C++ engine's true
+  ceiling that a single generator couldn't reach — with the latency curve's
+  offered axis staying correct. Works identically under `docker compose
+  --scale bot_fleet=N` and a Kubernetes Deployment with `replicas: N` + HPA.
 - Latency is bucketed into a 256-bin log-spaced histogram; per-tick **deltas**
   (sent/acked/errors/correctness/histogram) are `XADD`-ed to `arena:samples`.
 - Scale horizontally: `docker compose up --scale bot_fleet=3`.
@@ -214,8 +223,13 @@ contexts are uploaded to the daemon, so no shared host path is required.
   low-latency defect the benchmark caught. Remaining overhead: the Python load
   generator still adds ms-scale scheduling jitter at the high end; next is a
   compiled / multi-process generator.
+- **Scale-out & IaC** (✅ implemented). The bot fleet scales horizontally with
+  coordinated 1/N load splitting (above). Three IaC layers ship: `docker-compose.yml`
+  (single host, Swarm-compatible `deploy.replicas`), `k8s/` (kustomize: Deployments,
+  Services, RBAC, and a bot-fleet **HPA**), and `terraform/` (GKE cluster + autoscaling
+  node pool). Next: have the orchestrator provision sandboxes via the Kubernetes API
+  (Job/Pod per submission with the same isolation as pod spec) instead of the Docker
+  socket — RBAC for it is already in `k8s/orchestrator.yaml`.
 - **Languages:** Rust/Go submission templates (stubs today).
-- **Scale-out:** multi-host via Docker Swarm (`deploy.replicas` already present)
-  or Kubernetes manifests + Terraform for cloud provisioning.
 - **Hardening:** gVisor/Firecracker microVMs, seccomp profiles, egress controls,
   per-submission build caching, auth.

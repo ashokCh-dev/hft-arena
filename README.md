@@ -20,8 +20,10 @@ make up                      # build + start redis, orchestrator, telemetry, bot
 
 make demo                    # submit the Python reference engine and run a load test
 ./scripts/demo.sh cpp 500 30 # or: submit the C++ engine, 500 bots, 30s
-make scale                   # prove the load generator is distributed (3 bot workers)
+make scale                   # scale the load generator to 3 coordinated workers
 make down                    # stop everything
+# scaling proof: 1->3 bot workers took peak load ~91k -> ~180k ord/s (finding the
+# C++ engine's true ceiling) while the latency curve's offered axis stayed correct.
 ```
 
 On the dashboard you can also paste an engine, pick the language, set bots /
@@ -39,6 +41,8 @@ duration, and hit **Deploy & Attack** — or click **Load Python reference** fir
 | `telemetry/` | Redis-Streams ingester: p50/p90/p99, TPS, correctness, composite score |
 | `submission_templates/` | per-language sandbox Dockerfiles (cpp primary; python; go/rust to come) |
 | `docker-compose.yml` | **Infrastructure-as-Code** (Swarm-compatible `deploy.replicas`) |
+| `k8s/` | Kubernetes manifests (kustomize): Deployments, Services, RBAC, bot-fleet **HPA** |
+| `terraform/` | cloud cluster skeleton (GKE + autoscaling node pool) |
 | `docs/ARCHITECTURE.md` | architecture blueprint (microservices, protocols, scoring, isolation) |
 
 ## Submission contract

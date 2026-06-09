@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bot-fleet
+  namespace: hft-arena
+spec:
+  replicas: 2                 # scale this (or let the HPA below do it)
+  selector:
+    matchLabels: { app: bot-fleet }
+  template:
+    metadata:
+      labels: { app: bot-fleet }
+    spec:
+      containers:
+        - name: bot-fleet
+          image: hft-arena/bot-fleet:latest     # set in kustomization.yaml
+          env:
+            - { name: REDIS_URL,       value: "redis://redis:6379" }
+            - { name: BOTS_PER_WORKER, value: "250" }
+            - { name: SWEEP_RATES,     value: "5000,10000,20000,40000,80000" }
+            - { name: STEP_SECS,       value: "4" }
+            - { name: SWEEP_BOTS,      value: "120" }
+            # Workers self-coordinate via a Redis barrier keyed on run_id; each
+            # offers 1/N of the swept load, so replicas scale aggregate throughput
+            # without distorting the latency-vs-load curve.
+          resources:
+            requests: { cpu: "500m", memory: "128Mi" }
+            limits:   { cpu: "2",    memory: "512Mi" }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: bot-fleet
+  namespace: hft-arena
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: bot-fleet
+  minReplicas: 2
+  maxReplicas: 16
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }

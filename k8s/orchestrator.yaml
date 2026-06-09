@@ -1,0 +1,76 @@
+# Orchestrator control plane. On Kubernetes the submission sandbox is provisioned
+# via the Kubernetes API (a Job/Pod per submission) instead of the Docker socket,
+# so the ServiceAccount below is granted just enough RBAC to manage those Jobs.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator
+  namespace: hft-arena
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-manager
+  namespace: hft-arena
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orchestrator-sandbox-manager
+  namespace: hft-arena
+subjects:
+  - kind: ServiceAccount
+    name: orchestrator
+    namespace: hft-arena
+roleRef:
+  kind: Role
+  name: sandbox-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: hft-arena
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: orchestrator }
+  template:
+    metadata:
+      labels: { app: orchestrator }
+    spec:
+      serviceAccountName: orchestrator
+      containers:
+        - name: orchestrator
+          image: hft-arena/orchestrator:latest    # set in kustomization.yaml
+          ports:
+            - containerPort: 8000
+          env:
+            - { name: REDIS_URL,      value: "redis://redis:6379" }
+            - { name: ARENA_NETWORK,  value: "hft-arena" }
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: hft-arena
+spec:
+  selector: { app: orchestrator }
+  ports:
+    - port: 8000
+      targetPort: 8000
