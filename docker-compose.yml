@@ -15,6 +15,21 @@ services:
       timeout: 2s
       retries: 10
 
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: arena-timescaledb
+    environment:
+      POSTGRES_PASSWORD: arena
+      POSTGRES_DB: arena
+    volumes:
+      - arena_tsdb:/var/lib/postgresql/data
+    networks: [arena_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d arena"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
   orchestrator:
     build:
       context: .
@@ -38,11 +53,14 @@ services:
     container_name: arena-telemetry
     environment:
       REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://postgres:arena@timescaledb:5432/arena
       TARGET_TPS: "100000"     # peak TPS that earns the full throughput sub-score
       LAT_REF_US: "2000"       # p99 reference for the latency sub-score (at REF_LOAD)
       REF_LOAD: "10000"        # fixed offered load (ord/s) latency is scored at
     depends_on:
       redis:
+        condition: service_healthy
+      timescaledb:
         condition: service_healthy
     networks: [arena_net]
 
@@ -60,6 +78,9 @@ services:
     networks: [arena_net]
     deploy:
       replicas: 1              # scale with: docker compose up --scale bot_fleet=3
+
+volumes:
+  arena_tsdb:                 # TimescaleDB data (run history survives restarts)
 
 networks:
   arena_net:

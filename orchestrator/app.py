@@ -66,6 +66,13 @@ async def health():
     return {"ok": True}
 
 
+@app.get("/history")
+async def history():
+    """Recent runs persisted to TimescaleDB (maintained by telemetry)."""
+    raw = await r.get("arena:history")
+    return json.loads(raw) if raw else {"type": "history", "runs": []}
+
+
 class Submission(BaseModel):
     language: str = "python"
     code: str

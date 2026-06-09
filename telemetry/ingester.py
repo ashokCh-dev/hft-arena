@@ -1,8 +1,9 @@
 """Telemetry & Validation Ingester.
 
 Consumes the bot fleet's sample stream from Redis, aggregates per-run latency
-percentiles / TPS / correctness, computes the composite score, and publishes a
-live leaderboard snapshot that the orchestrator relays to the dashboard.
+percentiles / TPS / correctness, computes the composite score, publishes a live
+leaderboard snapshot, and persists every completed run to TimescaleDB (so the
+leaderboard survives restarts and we keep historical analytics).
 """
 import asyncio
 import json
@@ -11,17 +12,21 @@ import time
 
 import redis.asyncio as aioredis
 
+import store
 from metrics import Agg
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
 STREAM = "arena:samples"
 CH_CONTROL = "arena:control"
 CH_EVENTS = "arena:events"
+CH_RUNEVENTS = "arena:runevents"
 KEY_SNAPSHOT = "arena:snapshot"
 KEY_LB = "arena:leaderboard"        # persisted best-per-submission
+KEY_HISTORY = "arena:history"       # recent runs (for the dashboard history panel)
 
 RUNS = {}          # run_id -> Agg
-BEST = {}          # submission -> best snapshot (across runs)
+BEST = {}          # submission -> snapshot (live; seeded from DB on startup)
+POOL = None        # asyncpg pool (or None if persistence disabled)
 
 
 async def control_listener(r):
@@ -34,6 +39,34 @@ async def control_listener(r):
         cfg = json.loads(m["data"])
         if cfg.get("cmd") == "start":
             RUNS[cfg["run_id"]] = Agg(cfg["run_id"], cfg.get("submission", "?"))
+
+
+async def persist_listener(r):
+    """On run-done, persist the run's final snapshot to TimescaleDB + refresh history."""
+    pubsub = r.pubsub()
+    await pubsub.subscribe(CH_RUNEVENTS)
+    async for m in pubsub.listen():
+        if m.get("type") != "message":
+            continue
+        ev = json.loads(m["data"])
+        run_id = ev.get("run_id")
+        if not ev.get("done") or run_id not in RUNS:
+            continue
+        # Give the final sample flush a beat to land, then persist.
+        await asyncio.sleep(1.0)
+        snap = RUNS[run_id].snapshot()
+        try:
+            await store.persist_run(POOL, snap)
+            await _refresh_history(r)
+            print(f"[telemetry] persisted run {run_id} ({snap['submission']}, "
+                  f"score={snap['score']})", flush=True)
+        except Exception as exc:
+            print(f"[telemetry] persist failed: {exc}", flush=True)
+
+
+async def _refresh_history(r):
+    rows = await store.recent_runs(POOL, limit=20)
+    await r.set(KEY_HISTORY, json.dumps({"type": "history", "runs": rows}))
 
 
 async def sample_consumer(r):
@@ -79,15 +112,23 @@ async def publisher(r):
         msg = json.dumps(payload)
         await r.set(KEY_SNAPSHOT, msg)
         await r.publish(CH_EVENTS, msg)
-        # persist best-per-submission scores
         if BEST:
             await r.hset(KEY_LB, mapping={s: json.dumps(v) for s, v in BEST.items()})
 
 
 async def main():
+    global POOL, BEST
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
+    POOL = await store.connect()
+    # Recover the leaderboard from history so a restart isn't a blank board.
+    BEST = await store.load_best(POOL)
+    if BEST:
+        print(f"[telemetry] recovered {len(BEST)} submissions from TimescaleDB",
+              flush=True)
+        await _refresh_history(r)
     print("[telemetry] ingester online", flush=True)
-    await asyncio.gather(control_listener(r), sample_consumer(r), publisher(r))
+    await asyncio.gather(control_listener(r), persist_listener(r),
+                         sample_consumer(r), publisher(r))
 
 
 if __name__ == "__main__":

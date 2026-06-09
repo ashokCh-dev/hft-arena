@@ -37,7 +37,8 @@ throughput / correctness, and streams a live ranked leaderboard.
                           └──────────┘
 ```
 
-The four required components map 1:1 to four services plus Redis.
+The four required components map 1:1 to four services plus Redis (hot path) and
+TimescaleDB (durable run history).
 
 | Required component | Service | Tech |
 |---|---|---|
@@ -122,14 +123,22 @@ The four required components map 1:1 to four services plus Redis.
 | `arena:snapshot` (string) | last snapshot for new dashboard clients | telemetry → orchestrator |
 | `arena:leaderboard` (hash) | best score per submission (persisted) | telemetry |
 | `arena:scenario:<run>` (string, NX) | lock so one worker runs the correctness probe | bot_fleet |
+| `arena:fleet:<run>` (set) | replica barrier for coordinated 1/N load splitting | bot_fleet |
+| `arena:history` (string) | recent runs for the dashboard history panel | telemetry → orchestrator |
 | Docker socket | build + run + inspect sandboxes | orchestrator → host daemon |
 
-**Why Redis (and not Kafka/gRPC) for the slice:** Redis Streams give us
-consumer offsets and back-pressure for the metric firehose, pub/sub for fan-out,
-and hashes for leaderboard state — one tiny container, zero schema overhead. The
-sample format is already a stream of immutable delta records, so the swap to
-**Redpanda/Kafka** (a topic per metric class) is a transport change, not a model
-change. Service-to-service control could likewise move to **gRPC**. See §7.
+**Two data stores, by job:**
+- **Redis** — the hot path. Streams give us consumer offsets + back-pressure for
+  the metric firehose, pub/sub for fan-out, hashes/sets for live leaderboard and
+  coordination — one tiny container, zero schema overhead. The sample format is
+  already a stream of immutable delta records, so swapping to **Redpanda/Kafka**
+  (a topic per metric class) is a transport change, not a model change; control
+  could likewise move to **gRPC** (see §7).
+- **TimescaleDB** — durable analytics. Telemetry writes each *completed* run (with
+  its full latency-vs-load curve as JSONB) to a `runs` hypertable on the run-done
+  event. On startup it recovers the best-per-submission leaderboard from the DB, so
+  a telemetry/Redis restart isn't a blank board, and `/history` exposes recent runs.
+  Persistence degrades gracefully (telemetry runs Redis-only if the DB is absent).
 
 ---
 
@@ -213,8 +222,9 @@ contexts are uploaded to the daemon, so no shared host path is required.
 
 - **Transport:** swap Redis Streams → Redpanda/Kafka (topic per metric class);
   control plane → gRPC.
-- **Persistence/analytics:** land samples in TimescaleDB for historical
-  percentiles and per-run drill-down.
+- **Persistence/analytics** (✅ implemented): completed runs land in a TimescaleDB
+  hypertable (with curve); leaderboard recovers on restart; `/history` lists recent
+  runs. Next: continuous aggregates for per-submission percentile trends over time.
 - **Offered-load sweep + latency-vs-load curve** (✅ implemented). Scoring latency
   at a fixed reference load makes engines comparable; the curve shows each one's
   saturation knee. **Finding:** the sweep immediately exposed that the C++ engine

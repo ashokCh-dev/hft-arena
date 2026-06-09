@@ -15,7 +15,7 @@ Code Upload → Containerized Sandbox → Distributed Load Test → Real-Time Sc
 
 ```bash
 cd hft-arena
-make up                      # build + start redis, orchestrator, telemetry, bot_fleet
+make up                      # build + start redis, timescaledb, orchestrator, telemetry, bot_fleet
 # open http://localhost:8000
 
 make demo                    # submit the Python reference engine and run a load test
@@ -38,7 +38,7 @@ duration, and hit **Deploy & Attack** — or click **Load Python reference** fir
 | `reference_engine_py/` | Python price-time-priority order book (WS-JSON) — demo submission + oracle |
 | `reference_engine_cpp/` | C++ engine over `crow.h` (seeded from hft_arena's `contestant.cpp`) |
 | `bot_fleet/` | asyncio pipelined load generator + correctness probe; scalable replicas |
-| `telemetry/` | Redis-Streams ingester: p50/p90/p99, TPS, correctness, composite score |
+| `telemetry/` | Redis-Streams ingester: p50/p90/p99, TPS, correctness, score; **persists runs to TimescaleDB** |
 | `submission_templates/` | per-language sandbox Dockerfiles (cpp primary; python; go/rust to come) |
 | `docker-compose.yml` | **Infrastructure-as-Code** (Swarm-compatible `deploy.replicas`) |
 | `k8s/` | Kubernetes manifests (kustomize): Deployments, Services, RBAC, bot-fleet **HPA** |

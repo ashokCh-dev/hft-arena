@@ -81,6 +81,18 @@
     </table>
   </div>
 
+  <div class="panel" style="margin-top:16px">
+    <b>Run History</b>
+    <span style="color:#8b949e;font-size:.8em"> — persisted to TimescaleDB (survives restarts)</span>
+    <table>
+      <thead><tr>
+        <th>When</th><th>Submission</th><th>Score</th><th>Peak TPS</th>
+        <th>Sustains</th><th>p50 µs</th><th>p99 µs</th><th>Correctness</th>
+      </tr></thead>
+      <tbody id="hist"></tbody>
+    </table>
+  </div>
+
 <script>
 const $ = id => document.getElementById(id);
 
@@ -173,6 +185,22 @@ function render(d) {
     }
   }
 }
+
+async function loadHistory() {
+  try {
+    const d = await (await fetch('/history')).json();
+    const tb = $('hist'); tb.innerHTML = '';
+    (d.runs || []).forEach(h => {
+      const tr = document.createElement('tr');
+      const when = new Date(h.ts).toLocaleTimeString();
+      tr.innerHTML = `<td>${when}</td><td>${h.submission}</td><td>${h.score}</td>
+        <td>${fmt(h.peak_tps)}</td><td>${fmt(h.max_sustained_tps||0)}</td>
+        <td>${h.p50_us}</td><td>${h.p99_us}</td><td>${(h.correctness*100).toFixed(1)}%</td>`;
+      tb.appendChild(tr);
+    });
+  } catch (e) {}
+}
+setInterval(loadHistory, 5000); loadHistory();
 
 function connect() {
   const ws = new WebSocket('ws://' + location.host + '/ws/leaderboard');
