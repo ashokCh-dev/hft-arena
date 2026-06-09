@@ -257,6 +257,15 @@ async def run_load(cfg, r):
         await asyncio.sleep(1.5)                  # barrier: let all replicas register
         await scenarios.run(target, stats, iterations=10)
         await r.set(done_key, "1", ex=budget)
+        # Transmit the correctness results NOW. The per-phase reporters baseline
+        # their counters at creation (after this point), so they would never send
+        # the warmup probe's corr counts as a delta — emit them explicitly.
+        await r.xadd(STREAM, {
+            "run_id": run_id, "worker": WORKER_ID, "ts": str(time.time()),
+            "phase": "warmup", "rate": "0", "sent": "0", "acked": "0",
+            "errors": "0", "corr_pass": str(stats.corr_pass),
+            "corr_total": str(stats.corr_total), "hist": "[]",
+        }, maxlen=100000, approximate=True)
     else:
         for _ in range(120):                      # wait up to ~12s for the probe
             if await r.get(done_key):

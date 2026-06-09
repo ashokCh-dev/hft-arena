@@ -21,6 +21,7 @@ make up                      # build + start redis, timescaledb, orchestrator, t
 make demo                    # submit the Python reference engine and run a load test
 ./scripts/demo.sh cpp 500 30 # or: submit the C++ engine, 500 bots, 30s
 make scale                   # scale the load generator to 3 coordinated workers
+./tests/adversarial.sh       # security/resilience suite: cheating, mem-bomb, crasher
 make down                    # stop everything
 # scaling proof: 1->3 bot workers took peak load ~91k -> ~180k ord/s (finding the
 # C++ engine's true ceiling) while the latency curve's offered axis stayed correct.

@@ -216,6 +216,23 @@ with (verified via `docker inspect`):
 The orchestrator drives the host Docker daemon via the mounted socket; build
 contexts are uploaded to the daemon, so no shared host path is required.
 
+### Adversarial verification (`tests/adversarial.sh`)
+The Sandboxing + Validation defenses are continuously tested against hostile
+submissions, all verified green:
+
+| Attack (`tests/adversarial/`) | Defense proven |
+|---|---|
+| `cheater.py` — fast engine that violates price-time priority (LIFO fills) | Validation probe catches it → correctness **0.0**, score collapses |
+| `membomb.py` — allocates unbounded memory | `--memory` cap OOM-kills the container (`OOMKilled=true`); host + platform unaffected |
+| `crasher.py` — hard-exits mid-load | platform stays up; disconnects become errors → crash penalty; run still scored/persisted |
+| legit engine, run after the attacks | scores correctly (**0.99**) — no contamination |
+
+> This suite caught a real bug: correctness was being transmitted to telemetry as
+> *reliability only* (the price-time-priority result never reached the score, after
+> the sweep refactor moved the probe ahead of the per-phase reporters). The leader
+> now emits the probe's counts explicitly. A benchmark you don't attack is a
+> benchmark you don't actually trust.
+
 ---
 
 ## 7. Roadmap (next iteration / "tomorrow")
