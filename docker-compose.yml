@@ -43,6 +43,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       ARENA_NETWORK: arena_net
+      ARENA_API_KEY: "${ARENA_API_KEY:-}"   # set to require X-API-Key on submit/run/stop
     depends_on:
       redis:
         condition: service_healthy

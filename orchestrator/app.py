@@ -8,7 +8,7 @@ import json
 import os
 import uuid
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -22,6 +22,14 @@ else:
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
 STATIC = os.path.join(os.path.dirname(__file__), "static")
+# Mutating endpoints (/submissions, /runs, /stop) require this key when set; if
+# unset, auth is disabled (open) for local dev. Read-only views stay public.
+ARENA_API_KEY = os.environ.get("ARENA_API_KEY")
+
+
+async def require_key(x_api_key: str = Header(default=None)):
+    if ARENA_API_KEY and x_api_key != ARENA_API_KEY:
+        raise HTTPException(status_code=401, detail="invalid or missing API key")
 
 CH_CONTROL = "arena:control"   # orchestrator -> bot_fleet
 CH_EVENTS = "arena:events"     # telemetry/orchestrator -> dashboard
@@ -83,7 +91,7 @@ class Submission(BaseModel):
     name: str = "submission"
 
 
-@app.post("/submissions")
+@app.post("/submissions", dependencies=[Depends(require_key)])
 async def create_submission(sub: Submission):
     submission_id = uuid.uuid4().hex[:8]
     await publish_event({"status": f"Building {sub.name} ({sub.language})…"})
@@ -105,7 +113,7 @@ class RunReq(BaseModel):
     duration: int = 30
 
 
-@app.post("/runs")
+@app.post("/runs", dependencies=[Depends(require_key)])
 async def start_run(req: RunReq):
     meta = await r.hgetall(f"arena:submission:{req.submission_id}")
     if not meta:
@@ -143,7 +151,7 @@ async def _auto_stop(submission_id: str, after: int, name: str):
     await asyncio.to_thread(sandbox.stop, submission_id)
 
 
-@app.post("/stop")
+@app.post("/stop", dependencies=[Depends(require_key)])
 async def stop_all():
     await r.publish(CH_CONTROL, json.dumps({"cmd": "stop"}))
     return {"stopped": True}

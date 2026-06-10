@@ -34,7 +34,7 @@ duration, and hit **Deploy & Attack** — or click **Load Python reference** fir
 
 | Path | Component |
 |---|---|
-| `orchestrator/` | FastAPI control plane: submissions, runs, sandboxing, leaderboard WS, dashboard |
+| `orchestrator/` | FastAPI control plane: submissions, runs, sandboxing, leaderboard WS, dashboard. Set `ARENA_API_KEY` to require `X-API-Key` on submit/run/stop (reads stay public) |
 | `orchestrator/sandbox.py` | all container isolation policy (CPU pin, mem cap, cap-drop, read-only…) |
 | `reference_engine_cpp/` | C++ engine over `crow.h` (seeded from hft_arena's `contestant.cpp`) |
 | `reference_engine_rust/` | Rust engine (tokio + tungstenite) price-time book |

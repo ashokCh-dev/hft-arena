@@ -50,6 +50,7 @@
       </label>
       <label>Bots <input id="bots" type="number" value="250" style="width:90px"></label>
       <label>Duration s <input id="dur" type="number" value="8" style="width:70px"></label>
+      <label>API key <input id="apikey" type="password" placeholder="if required" style="width:120px"></label>
       <button onclick="loadSample()" class="secondary">Load reference</button>
       <button onclick="deploy()">Deploy &amp; Attack</button>
       <button onclick="stopRun()" class="secondary">Stop</button>
@@ -104,20 +105,28 @@ async function loadSample() {
   $('code').value = await r.text();
 }
 
+function authHeaders() {
+  const k = $('apikey').value || localStorage.getItem('arena_key') || '';
+  if (k) localStorage.setItem('arena_key', k);
+  return Object.assign({'Content-Type':'application/json'}, k ? {'X-API-Key':k} : {});
+}
+
 async function deploy() {
   $('status').innerText = 'Submitting…';
-  const sub = await (await fetch('/submissions', {
-    method:'POST', headers:{'Content-Type':'application/json'},
+  const res = await fetch('/submissions', {
+    method:'POST', headers:authHeaders(),
     body: JSON.stringify({ language:$('lang').value, code:$('code').value, name:$('lang').value+'-engine' })
-  })).json();
+  });
+  if (res.status === 401) { $('status').innerText = 'Unauthorized — set the API key.'; return; }
+  const sub = await res.json();
   if (sub.error || !sub.submission_id) { $('status').innerText = 'Build error: '+(sub.error||'unknown'); return; }
   await fetch('/runs', {
-    method:'POST', headers:{'Content-Type':'application/json'},
+    method:'POST', headers:authHeaders(),
     body: JSON.stringify({ submission_id:sub.submission_id, bots:+$('bots').value, duration:+$('dur').value })
   });
 }
 
-function stopRun(){ fetch('/stop', {method:'POST'}); }
+function stopRun(){ fetch('/stop', {method:'POST', headers:authHeaders()}); }
 
 function fmt(n){ return (n>=1000? (n/1000).toFixed(1)+'k' : n); }
 

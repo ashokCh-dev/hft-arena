@@ -10,6 +10,9 @@ BOTS="${2:-400}"
 DURATION="${3:-8}"
 BASE="http://localhost:8000"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Pass the API key if the orchestrator requires one (ARENA_API_KEY in the env).
+AUTH=()
+[ -n "${ARENA_API_KEY:-}" ] && AUTH=(-H "X-API-Key: ${ARENA_API_KEY}")
 
 case "$LANG_SEL" in
   python) SRC="$ROOT/reference_engine_py/engine.py" ;;
@@ -19,13 +22,13 @@ esac
 
 echo "==> Submitting $LANG_SEL reference engine ($SRC)"
 CODE_JSON=$(python3 -c "import json,sys; print(json.dumps(open(sys.argv[1]).read()))" "$SRC")
-SUB=$(curl -s -X POST "$BASE/submissions" -H 'Content-Type: application/json' \
+SUB=$(curl -s -X POST "$BASE/submissions" "${AUTH[@]}" -H 'Content-Type: application/json' \
       -d "{\"language\":\"$LANG_SEL\",\"name\":\"$LANG_SEL-engine\",\"code\":$CODE_JSON}")
 echo "    response: $SUB"
 SUBMISSION_ID=$(echo "$SUB" | python3 -c "import json,sys; print(json.load(sys.stdin)['submission_id'])")
 
 echo "==> Launching run: $BOTS bots for ${DURATION}s against submission $SUBMISSION_ID"
-RUN=$(curl -s -X POST "$BASE/runs" -H 'Content-Type: application/json' \
+RUN=$(curl -s -X POST "$BASE/runs" "${AUTH[@]}" -H 'Content-Type: application/json' \
       -d "{\"submission_id\":\"$SUBMISSION_ID\",\"bots\":$BOTS,\"duration\":$DURATION}")
 echo "    response: $RUN"
 
