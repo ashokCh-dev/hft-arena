@@ -17,7 +17,17 @@ from kubernetes import client, config
 NAMESPACE = os.environ.get("ARENA_NAMESPACE", "hft-arena")
 ENGINE_PORT = 9000
 
-# Language -> prebuilt reference image loaded into the cluster.
+TEMPLATES = os.path.join(os.path.dirname(__file__), "submission_templates")
+ENTRY = {"python": "engine.py", "cpp": "engine.cpp"}
+
+# In-cluster builds: Kaniko builds the uploaded source and pushes to this registry.
+# REGISTRY_IP lets the build pod resolve the registry host (a Docker-network name
+# CoreDNS can't resolve) via a hostAlias. If unset, fall back to a prebuilt image.
+BUILD_REGISTRY = os.environ.get("BUILD_REGISTRY")        # e.g. arena-reg:5000
+REGISTRY_IP = os.environ.get("REGISTRY_IP")              # e.g. 172.18.0.4
+KANIKO_IMAGE = os.environ.get("KANIKO_IMAGE", "gcr.io/kaniko-project/executor:latest")
+
+# Language -> prebuilt reference image (fallback when in-cluster build is off).
 IMAGE_FOR = {
     "python": os.environ.get("REF_IMAGE_PY", "arena-ref-py:latest"),
     "cpp": os.environ.get("REF_IMAGE_CPP", "arena-ref-cpp:latest"),
@@ -28,6 +38,7 @@ try:
 except Exception:
     config.load_kube_config()
 _v1 = client.CoreV1Api()
+_batch = client.BatchV1Api()
 
 _image = {}        # submission_id -> image
 _ip = {}           # submission_id -> pod IP (after wait_healthy)
@@ -38,12 +49,116 @@ def pod_name(submission_id: str) -> str:
 
 
 def build_image(submission_id: str, language: str, code: str) -> str:
-    """K8s mode: map language to a prebuilt reference image (source-build = TODO)."""
-    if language not in IMAGE_FOR:
+    """Build the uploaded source in-cluster with Kaniko, pushing to the registry.
+
+    Falls back to a prebuilt reference image if BUILD_REGISTRY/REGISTRY_IP are unset.
+    """
+    if language not in ENTRY:
         raise ValueError(f"unsupported language for k8s backend: {language}")
-    img = IMAGE_FOR[language]
+    if not (BUILD_REGISTRY and REGISTRY_IP):
+        img = IMAGE_FOR[language]            # prebuilt fallback
+        _image[submission_id] = img
+        return img
+    img = _kaniko_build(submission_id, language, code)
     _image[submission_id] = img
     return img
+
+
+def _kaniko_build(submission_id: str, language: str, code: str) -> str:
+    """Assemble a ConfigMap build context + run a Kaniko Job that pushes the image."""
+    cm_name = f"arena-ctx-{submission_id}"
+    job_name = f"arena-build-{submission_id}"
+    dest = f"{BUILD_REGISTRY}/arena-sub-{submission_id}:latest"
+
+    # Build context: template files (Dockerfile, provided libs) + the submitted source.
+    tmpl = os.path.join(TEMPLATES, language)
+    data = {}
+    for fn in os.listdir(tmpl):
+        with open(os.path.join(tmpl, fn), "r", encoding="utf-8", errors="replace") as f:
+            data[fn] = f.read()
+    data[ENTRY[language]] = code
+
+    _delete_cm(cm_name)
+    _v1.create_namespaced_config_map(NAMESPACE, client.V1ConfigMap(
+        metadata=client.V1ObjectMeta(name=cm_name, labels={"arena": "buildctx"}),
+        data=data))
+
+    _delete_job(job_name)
+    _batch.create_namespaced_job(NAMESPACE, client.V1Job(
+        metadata=client.V1ObjectMeta(name=job_name, labels={"arena": "build"}),
+        spec=client.V1JobSpec(
+            backoff_limit=0, ttl_seconds_after_finished=120,
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(labels={"arena": "build"}),
+                spec=client.V1PodSpec(
+                    restart_policy="Never",
+                    # Build pod can't resolve the Docker-network registry name via
+                    # CoreDNS — map it to the registry's cluster-network IP.
+                    host_aliases=[client.V1HostAlias(
+                        ip=REGISTRY_IP, hostnames=[BUILD_REGISTRY.split(":")[0]])],
+                    # ConfigMap volumes expose files as symlinks, which Kaniko's COPY
+                    # captures as dangling links. Dereference them into an emptyDir
+                    # (cp -rL) so the build context has real files.
+                    init_containers=[client.V1Container(
+                        name="ctx-copy", image="busybox:1.36",
+                        command=["sh", "-c", "cp -rL /cm/. /work/"],
+                        volume_mounts=[
+                            client.V1VolumeMount(name="cm", mount_path="/cm"),
+                            client.V1VolumeMount(name="work", mount_path="/work")])],
+                    containers=[client.V1Container(
+                        name="kaniko", image=KANIKO_IMAGE,
+                        args=["--dockerfile=Dockerfile", "--context=dir:///work",
+                              f"--destination={dest}", "--insecure",
+                              "--insecure-pull", "--skip-tls-verify"],
+                        volume_mounts=[client.V1VolumeMount(
+                            name="work", mount_path="/work")])],
+                    volumes=[
+                        client.V1Volume(name="cm", config_map=client.V1ConfigMapVolumeSource(
+                            name=cm_name)),
+                        client.V1Volume(name="work", empty_dir=client.V1EmptyDirVolumeSource())])))))
+
+    if not _wait_job(job_name, timeout=300):
+        log = _job_log(job_name)
+        raise RuntimeError(f"kaniko build failed: {log[-400:]}")
+    _delete_cm(cm_name)
+    return dest
+
+
+def _wait_job(job_name: str, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        j = _batch.read_namespaced_job(job_name, NAMESPACE)   # avoids jobs/status RBAC
+        if j.status.succeeded:
+            return True
+        if j.status.failed:
+            return False
+        time.sleep(2)
+    return False
+
+
+def _job_log(job_name: str) -> str:
+    try:
+        pods = _v1.list_namespaced_pod(NAMESPACE, label_selector="arena=build")
+        for p in pods.items:
+            if p.metadata.name.startswith(job_name):
+                return _v1.read_namespaced_pod_log(p.metadata.name, NAMESPACE)
+    except client.ApiException:
+        pass
+    return ""
+
+
+def _delete_cm(name: str):
+    try:
+        _v1.delete_namespaced_config_map(name, NAMESPACE)
+    except client.ApiException:
+        pass
+
+
+def _delete_job(name: str):
+    try:
+        _batch.delete_namespaced_job(name, NAMESPACE, propagation_policy="Background")
+    except client.ApiException:
+        pass
 
 
 def launch(submission_id: str, language: str = "python"):

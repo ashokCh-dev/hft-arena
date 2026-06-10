@@ -45,7 +45,15 @@ expressed as pod spec: `resources.limits` (CPU/memory), `securityContext`
 bot fleet reaches it at the Pod IP. CPU pinning maps to the node's `static` CPU
 manager policy / Guaranteed QoS (see `../terraform/`).
 
-**Remaining:** building the image from uploaded source moves to an in-cluster
-builder (BuildKit/**Kaniko**) pushing to a registry; today the k8s backend runs a
-prebuilt reference image. A `NetworkPolicy` restricting submission egress to only
-the bot fleet is also a quick follow-up. See `../terraform/` for the cluster itself.
+**In-cluster builds (implemented):** with `BUILD_REGISTRY` + `REGISTRY_IP` set, the
+orchestrator builds the uploaded source **in-cluster with Kaniko** — it writes the
+build context (template Dockerfile + source) to a ConfigMap, runs a Kaniko Job
+(an init container dereferences the ConfigMap symlinks into an emptyDir first) that
+pushes `arena-reg:5000/arena-sub-<id>` to the cluster registry, then runs the Pod
+from that image. No Docker socket anywhere. Create the cluster with a registry:
+`k3d cluster create arena --registry-create arena-reg:0.0.0.0:5111`, and set
+`REGISTRY_IP` to the registry's cluster-network IP
+(`docker inspect arena-reg -f '{{(index .NetworkSettings.Networks "k3d-arena").IPAddress}}'`).
+
+**Remaining:** a `NetworkPolicy` restricting submission egress to only the bot
+fleet. See `../terraform/` for provisioning the cluster itself.

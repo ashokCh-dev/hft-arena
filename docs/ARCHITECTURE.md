@@ -267,11 +267,12 @@ submissions, all verified green:
   Services, RBAC, and a bot-fleet **HPA**), and `terraform/` (GKE cluster + autoscaling
   node pool). The whole platform was deployed to a **k3d cluster** and a full run
   verified in-cluster.
-- **K8s-native sandboxing** (✅ implemented). The orchestrator provisions each
-  submission as an isolated **Pod via the Kubernetes API** (`sandbox_k8s.py`,
-  `SANDBOX_BACKEND=k8s`) instead of the Docker socket. Next: in-cluster source→image
-  builds via **Kaniko** so uploaded source (not just a prebuilt image) is built in
-  the cluster.
+- **K8s-native sandboxing + in-cluster builds** (✅ implemented). The orchestrator
+  provisions each submission as an isolated **Pod via the Kubernetes API**
+  (`sandbox_k8s.py`, `SANDBOX_BACKEND=k8s`) instead of the Docker socket, and builds
+  the uploaded source **in-cluster with Kaniko** (ConfigMap build context → Kaniko
+  Job → push to an in-cluster registry → Pod runs the built image). Verified on k3d:
+  submit source → Kaniko build → scored run, no Docker socket anywhere.
 - **Languages:** Rust/Go submission templates (stubs today).
 - **Hardening:** gVisor/Firecracker microVMs, seccomp profiles, egress controls,
   per-submission build caching, auth.
