@@ -8,6 +8,7 @@ resources:
   - telemetry.yaml
   - bot-fleet.yaml
   - orchestrator.yaml
+  - networkpolicy.yaml
 
 # Defaults to the images built by `docker compose build` (import them into a local
 # cluster with `k3d image import`). For a cloud registry, retag/push and change

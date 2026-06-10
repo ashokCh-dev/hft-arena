@@ -55,5 +55,10 @@ from that image. No Docker socket anywhere. Create the cluster with a registry:
 `REGISTRY_IP` to the registry's cluster-network IP
 (`docker inspect arena-reg -f '{{(index .NetworkSettings.Networks "k3d-arena").IPAddress}}'`).
 
-**Remaining:** a `NetworkPolicy` restricting submission egress to only the bot
-fleet. See `../terraform/` for provisioning the cluster itself.
+**Network isolation (implemented):** `networkpolicy.yaml` locks down submission
+pods — **deny-all egress** (no exfiltration / C2 / cluster scanning) and ingress
+only from the bot fleet + orchestrator on :9000. Verified on k3s (which enforces
+NetworkPolicy): a submission pod cannot reach the K8s API or the internet, an
+unlabeled pod cannot reach the engine, but the fleet can.
+
+See `../terraform/` for provisioning the cluster itself.

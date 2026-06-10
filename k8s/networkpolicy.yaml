@@ -1,0 +1,26 @@
+# Submission isolation: a contestant's engine is reachable ONLY by the bot fleet
+# (and the orchestrator's health check) on the engine port, and may NOT initiate
+# any outbound connection. This contains a malicious/compromised submission — no
+# exfiltration, no C2 callback, no scanning of cluster services.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: submission-isolation
+  namespace: hft-arena
+spec:
+  podSelector:
+    matchLabels:
+      arena: submission
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: bot-fleet }
+        - podSelector:
+            matchLabels: { app: orchestrator }
+      ports:
+        - protocol: TCP
+          port: 9000
+  egress: []        # deny ALL egress from submission pods

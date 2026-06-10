@@ -214,7 +214,7 @@ with (verified via `docker inspect`):
 | `--security-opt no-new-privileges` | on | setuid escalation |
 | `read_only` rootfs + tmpfs `/tmp` | on | tampering / persistence |
 | non-root `USER runner` | in template | container-as-root risks |
-| dedicated bridge `arena_net` | isolated | lateral movement; only the fleet reaches it |
+| dedicated bridge `arena_net` (docker) / `NetworkPolicy` (k8s) | network isolation | exfiltration, C2 callback, lateral movement — submission has deny-all egress and is reachable only by the fleet |
 
 **Two interchangeable sandbox backends** (selected by `SANDBOX_BACKEND`), same
 isolation either way:
