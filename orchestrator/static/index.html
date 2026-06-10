@@ -42,13 +42,15 @@
     <div class="controls">
       <label>Language
         <select id="lang">
-          <option value="python">python</option>
           <option value="cpp">cpp</option>
+          <option value="rust">rust</option>
+          <option value="go">go</option>
+          <option value="python">python</option>
         </select>
       </label>
       <label>Bots <input id="bots" type="number" value="250" style="width:90px"></label>
-      <label>Duration s <input id="dur" type="number" value="30" style="width:70px"></label>
-      <button onclick="loadSample()" class="secondary">Load Python reference</button>
+      <label>Duration s <input id="dur" type="number" value="8" style="width:70px"></label>
+      <button onclick="loadSample()" class="secondary">Load reference</button>
       <button onclick="deploy()">Deploy &amp; Attack</button>
       <button onclick="stopRun()" class="secondary">Stop</button>
     </div>
@@ -97,9 +99,9 @@
 const $ = id => document.getElementById(id);
 
 async function loadSample() {
-  const r = await fetch('/static/sample_python.txt');
+  const lang = $('lang').value;
+  const r = await fetch('/static/sample_' + lang + '.txt');
   $('code').value = await r.text();
-  $('lang').value = 'python';
 }
 
 async function deploy() {

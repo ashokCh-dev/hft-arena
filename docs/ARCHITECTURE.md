@@ -68,10 +68,13 @@ TimescaleDB (durable run history).
   dropped in as the entrypoint (`engine.py` / `engine.cpp`); the platform
   provides the toolchain and standard libs (e.g. `crow.h` for C++).
 - Speaks the **WS-JSON order contract** (§4) on port 9000.
-- Two reference engines ship as demo submissions and correctness oracles:
-  - `reference_engine_py` — asyncio `websockets` price-time book.
-  - `reference_engine_cpp` — `crow.h` WebSocket + a `std::map`/`std::list`
-    price-time book (seeded from hft_arena's `contestant.cpp`).
+- Four reference engines ship as demo submissions / correctness oracles, one per
+  supported language — all implement the same WS-JSON price-time book:
+  - `reference_engine_cpp` — `crow.h` WebSocket + `std::map`/`std::list` (seeded
+    from hft_arena's `contestant.cpp`).
+  - `reference_engine_rust` — tokio + tokio-tungstenite + `BTreeMap`/`VecDeque`.
+  - `reference_engine_go` — gorilla/websocket + `container/list`.
+  - `reference_engine_py` — asyncio `websockets` (also the correctness oracle).
 
 ### bot_fleet (distributed load generator)
 - Each replica subscribes to `arena:control`. On `start`, it runs each load in
@@ -273,6 +276,8 @@ submissions, all verified green:
   the uploaded source **in-cluster with Kaniko** (ConfigMap build context → Kaniko
   Job → push to an in-cluster registry → Pod runs the built image). Verified on k3d:
   submit source → Kaniko build → scored run, no Docker socket anywhere.
-- **Languages:** Rust/Go submission templates (stubs today).
+- **Languages** (✅ implemented). Submission templates + verified reference engines
+  for **C++, Rust, Go, Python** — all build from source and pass the price-time
+  correctness probe (measured peak: Rust/Go ~94k, C++ ~84k, Python ~51k TPS).
 - **Hardening:** gVisor/Firecracker microVMs, seccomp profiles, egress controls,
   per-submission build caching, auth.

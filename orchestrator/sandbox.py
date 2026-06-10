@@ -15,7 +15,8 @@ import time
 import docker
 
 TEMPLATES = os.path.join(os.path.dirname(__file__), "submission_templates")
-ENTRY = {"python": "engine.py", "cpp": "engine.cpp"}
+ENTRY = {"python": "engine.py", "cpp": "engine.cpp",
+         "go": "engine.go", "rust": "main.rs"}
 
 # Resource limits (CPU pinning + hard memory cap + pid cap) — fair, contained.
 SANDBOX_CPUS = float(os.environ.get("SANDBOX_CPUS", "2.0"))

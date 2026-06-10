@@ -18,7 +18,8 @@ NAMESPACE = os.environ.get("ARENA_NAMESPACE", "hft-arena")
 ENGINE_PORT = 9000
 
 TEMPLATES = os.path.join(os.path.dirname(__file__), "submission_templates")
-ENTRY = {"python": "engine.py", "cpp": "engine.cpp"}
+ENTRY = {"python": "engine.py", "cpp": "engine.cpp",
+         "go": "engine.go", "rust": "main.rs"}
 
 # In-cluster builds: Kaniko builds the uploaded source and pushes to this registry.
 # REGISTRY_IP lets the build pod resolve the registry host (a Docker-network name

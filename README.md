@@ -36,11 +36,13 @@ duration, and hit **Deploy & Attack** — or click **Load Python reference** fir
 |---|---|
 | `orchestrator/` | FastAPI control plane: submissions, runs, sandboxing, leaderboard WS, dashboard |
 | `orchestrator/sandbox.py` | all container isolation policy (CPU pin, mem cap, cap-drop, read-only…) |
-| `reference_engine_py/` | Python price-time-priority order book (WS-JSON) — demo submission + oracle |
 | `reference_engine_cpp/` | C++ engine over `crow.h` (seeded from hft_arena's `contestant.cpp`) |
+| `reference_engine_rust/` | Rust engine (tokio + tungstenite) price-time book |
+| `reference_engine_go/` | Go engine (gorilla/websocket) price-time book |
+| `reference_engine_py/` | Python price-time book (WS-JSON) — demo + correctness oracle |
 | `bot_fleet/` | asyncio pipelined load generator + correctness probe; scalable replicas |
 | `telemetry/` | Redis-Streams ingester: p50/p90/p99, TPS, correctness, score; **persists runs to TimescaleDB** |
-| `submission_templates/` | per-language sandbox Dockerfiles (cpp primary; python; go/rust to come) |
+| `submission_templates/` | per-language sandbox build templates: **cpp, rust, go, python** |
 | `docker-compose.yml` | **Infrastructure-as-Code** (Swarm-compatible `deploy.replicas`) |
 | `k8s/` | Kubernetes manifests (kustomize): Deployments, Services, RBAC, bot-fleet **HPA** |
 | `terraform/` | cloud cluster skeleton (GKE + autoscaling node pool) |
