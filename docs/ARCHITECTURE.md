@@ -131,12 +131,15 @@ TimescaleDB (durable run history).
 | Docker socket | build + run + inspect sandboxes | orchestrator → host daemon |
 
 **Two data stores, by job:**
-- **Redis** — the hot path. Streams give us consumer offsets + back-pressure for
-  the metric firehose, pub/sub for fan-out, hashes/sets for live leaderboard and
-  coordination — one tiny container, zero schema overhead. The sample format is
-  already a stream of immutable delta records, so swapping to **Redpanda/Kafka**
-  (a topic per metric class) is a transport change, not a model change; control
-  could likewise move to **gRPC** (see §7).
+- **Redis** — coordination + state: pub/sub for control/events fan-out, hashes/sets
+  for the live leaderboard and fleet coordination — one tiny container, zero schema
+  overhead.
+- **Metrics transport (pluggable, `TRANSPORT=redis|kafka`)** — the high-volume
+  sample firehose (bot_fleet → telemetry) runs over **Redis Streams** *or*
+  **Redpanda/Kafka** (topic `arena.samples`, telemetry consumer group), matching
+  the blueprint's "Kafka/Redpanda for metrics." Both verified end-to-end; the
+  record format is identical, so it's a true transport swap. Control could likewise
+  move to **gRPC** (see §7).
 - **TimescaleDB** — durable analytics. Telemetry writes each *completed* run (with
   its full latency-vs-load curve as JSONB) to a `runs` hypertable on the run-done
   event. On startup it recovers the best-per-submission leaderboard from the DB, so
@@ -251,8 +254,9 @@ submissions, all verified green:
 
 ## 7. Roadmap (next iteration / "tomorrow")
 
-- **Transport:** swap Redis Streams → Redpanda/Kafka (topic per metric class);
-  control plane → gRPC.
+- **Transport** (✅ Kafka done): the metrics firehose is pluggable Redis Streams ↔
+  Redpanda/Kafka (`TRANSPORT=kafka`). Remaining: move the orchestrator↔fleet control
+  plane from Redis pub/sub to **gRPC**.
 - **Persistence/analytics** (✅ implemented): completed runs land in a TimescaleDB
   hypertable (with curve); leaderboard recovers on restart; `/history` lists recent
   runs. Shipped for **both** deployments — docker-compose and the k8s manifests

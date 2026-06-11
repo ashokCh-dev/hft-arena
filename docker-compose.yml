@@ -15,6 +15,24 @@ services:
       timeout: 2s
       retries: 10
 
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: arena-redpanda
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=512M
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    networks: [arena_net]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   timescaledb:
     image: timescale/timescaledb:2.17.2-pg16
     container_name: arena-timescaledb
@@ -58,10 +76,14 @@ services:
       TARGET_TPS: "100000"     # peak TPS that earns the full throughput sub-score
       LAT_REF_US: "2000"       # p99 reference for the latency sub-score (at REF_LOAD)
       REF_LOAD: "10000"        # fixed offered load (ord/s) latency is scored at
+      TRANSPORT: "${TRANSPORT:-redis}"   # metrics transport: redis | kafka
+      KAFKA_BOOTSTRAP: redpanda:9092
     depends_on:
       redis:
         condition: service_healthy
       timescaledb:
+        condition: service_healthy
+      redpanda:
         condition: service_healthy
     networks: [arena_net]
 
@@ -73,8 +95,12 @@ services:
       SWEEP_RATES: "5000,10000,20000,40000,80000"  # open-loop offered-load sweep (ord/s)
       STEP_SECS: "4"           # seconds per sweep step
       SWEEP_BOTS: "120"        # bot pool size during the sweep
+      TRANSPORT: "${TRANSPORT:-redis}"   # metrics transport: redis | kafka
+      KAFKA_BOOTSTRAP: redpanda:9092
     depends_on:
       redis:
+        condition: service_healthy
+      redpanda:
         condition: service_healthy
     networks: [arena_net]
     deploy:

@@ -17,6 +17,9 @@ from metrics import Agg
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
 STREAM = "arena:samples"
+TRANSPORT = os.environ.get("TRANSPORT", "redis")      # "redis" | "kafka"
+KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "redpanda:9092")
+SAMPLES_TOPIC = os.environ.get("SAMPLES_TOPIC", "arena.samples")
 CH_CONTROL = "arena:control"
 CH_EVENTS = "arena:events"
 CH_RUNEVENTS = "arena:runevents"
@@ -69,7 +72,27 @@ async def _refresh_history(r):
     await r.set(KEY_HISTORY, json.dumps({"type": "history", "runs": rows}))
 
 
+def _apply(fields):
+    """Fold one fleet sample record into its run aggregate (transport-agnostic)."""
+    run_id = fields.get("run_id")
+    agg = RUNS.get(run_id)
+    if agg is None:
+        agg = RUNS[run_id] = Agg(run_id)
+    agg.add(
+        int(fields.get("sent", 0)),
+        int(fields.get("acked", 0)),
+        int(fields.get("errors", 0)),
+        int(fields.get("corr_pass", 0)),
+        int(fields.get("corr_total", 0)),
+        json.loads(fields.get("hist", "[]")),
+        fields.get("phase", "open"),
+        int(fields.get("rate", 0)),
+        float(fields.get("ts", 0.0)),
+    )
+
+
 async def sample_consumer(r):
+    """Redis Streams transport."""
     last_id = "$"
     while True:
         resp = await r.xread({STREAM: last_id}, block=500, count=1000)
@@ -78,21 +101,22 @@ async def sample_consumer(r):
         for _stream, entries in resp:
             for entry_id, fields in entries:
                 last_id = entry_id
-                run_id = fields.get("run_id")
-                agg = RUNS.get(run_id)
-                if agg is None:
-                    agg = RUNS[run_id] = Agg(run_id)
-                agg.add(
-                    int(fields.get("sent", 0)),
-                    int(fields.get("acked", 0)),
-                    int(fields.get("errors", 0)),
-                    int(fields.get("corr_pass", 0)),
-                    int(fields.get("corr_total", 0)),
-                    json.loads(fields.get("hist", "[]")),
-                    fields.get("phase", "open"),
-                    int(fields.get("rate", 0)),
-                    float(fields.get("ts", 0.0)),
-                )
+                _apply(fields)
+
+
+async def sample_consumer_kafka():
+    """Redpanda/Kafka transport (consumer group)."""
+    from aiokafka import AIOKafkaConsumer
+    consumer = AIOKafkaConsumer(
+        SAMPLES_TOPIC, bootstrap_servers=KAFKA_BOOTSTRAP,
+        group_id="telemetry", auto_offset_reset="latest")
+    await consumer.start()
+    print(f"[telemetry] kafka consumer <- {KAFKA_BOOTSTRAP}/{SAMPLES_TOPIC}", flush=True)
+    try:
+        async for msg in consumer:
+            _apply(json.loads(msg.value))
+    finally:
+        await consumer.stop()
 
 
 async def publisher(r):
@@ -126,9 +150,10 @@ async def main():
         print(f"[telemetry] recovered {len(BEST)} submissions from TimescaleDB",
               flush=True)
         await _refresh_history(r)
-    print("[telemetry] ingester online", flush=True)
+    samples = sample_consumer_kafka() if TRANSPORT == "kafka" else sample_consumer(r)
+    print(f"[telemetry] ingester online, transport={TRANSPORT}", flush=True)
     await asyncio.gather(control_listener(r), persist_listener(r),
-                         sample_consumer(r), publisher(r))
+                         samples, publisher(r))
 
 
 if __name__ == "__main__":

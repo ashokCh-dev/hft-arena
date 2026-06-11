@@ -38,6 +38,14 @@ CH_CONTROL = "arena:control"
 CH_RUNEVENTS = "arena:runevents"
 STREAM = "arena:samples"
 
+# Metrics transport: "redis" (Streams) or "kafka" (Redpanda/Kafka topic). Redis is
+# still used for control/coordination either way; only the high-volume sample
+# firehose moves to Kafka — matching the blueprint's "Kafka/Redpanda for metrics".
+TRANSPORT = os.environ.get("TRANSPORT", "redis")
+KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "redpanda:9092")
+SAMPLES_TOPIC = os.environ.get("SAMPLES_TOPIC", "arena.samples")
+PRODUCER = None        # AIOKafkaProducer when TRANSPORT == "kafka"
+
 # --- latency histogram (log-spaced microseconds) -------------------------------
 # Bucket mapping MUST stay in sync with telemetry/metrics.py.
 NBUCKETS = 256
@@ -179,13 +187,17 @@ async def _flush(stats, r, last, last_hist, tag):
         return
     last.update(sent=stats.sent, acked=stats.acked, errors=stats.errors,
                 corr_pass=stats.corr_pass, corr_total=stats.corr_total)
-    await r.xadd(STREAM, {
+    rec = {
         "run_id": stats.run_id, "worker": WORKER_ID, "ts": str(time.time()),
         "phase": tag["phase"], "rate": str(tag["rate"]),
         "sent": str(d_sent), "acked": str(d_acked), "errors": str(d_err),
         "corr_pass": str(d_cp), "corr_total": str(d_ct),
         "hist": json.dumps(hist_delta),
-    }, maxlen=100000, approximate=True)
+    }
+    if TRANSPORT == "kafka":
+        await PRODUCER.send_and_wait(SAMPLES_TOPIC, json.dumps(rec).encode())
+    else:
+        await r.xadd(STREAM, rec, maxlen=100000, approximate=True)
 
 
 async def run_closed(target, stats, n, duration, r):
@@ -260,12 +272,16 @@ async def run_load(cfg, r):
         # Transmit the correctness results NOW. The per-phase reporters baseline
         # their counters at creation (after this point), so they would never send
         # the warmup probe's corr counts as a delta — emit them explicitly.
-        await r.xadd(STREAM, {
+        rec = {
             "run_id": run_id, "worker": WORKER_ID, "ts": str(time.time()),
             "phase": "warmup", "rate": "0", "sent": "0", "acked": "0",
             "errors": "0", "corr_pass": str(stats.corr_pass),
             "corr_total": str(stats.corr_total), "hist": "[]",
-        }, maxlen=100000, approximate=True)
+        }
+        if TRANSPORT == "kafka":
+            await PRODUCER.send_and_wait(SAMPLES_TOPIC, json.dumps(rec).encode())
+        else:
+            await r.xadd(STREAM, rec, maxlen=100000, approximate=True)
     else:
         for _ in range(120):                      # wait up to ~12s for the probe
             if await r.get(done_key):
@@ -293,11 +309,18 @@ async def run_load(cfg, r):
 
 
 async def main():
+    global PRODUCER
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
+    if TRANSPORT == "kafka":
+        from aiokafka import AIOKafkaProducer
+        PRODUCER = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP,
+                                    linger_ms=20, acks=1)
+        await PRODUCER.start()
+        print(f"[bot_fleet:{WORKER_ID}] kafka producer -> {KAFKA_BOOTSTRAP}", flush=True)
     pubsub = r.pubsub()
     await pubsub.subscribe(CH_CONTROL)
-    print(f"[bot_fleet:{WORKER_ID}] ready, BOTS_PER_WORKER={BOTS_PER_WORKER}",
-          flush=True)
+    print(f"[bot_fleet:{WORKER_ID}] ready, BOTS_PER_WORKER={BOTS_PER_WORKER}, "
+          f"transport={TRANSPORT}", flush=True)
     current = None
     async for m in pubsub.listen():
         if m.get("type") != "message":
