@@ -1,5 +1,7 @@
 # HFT Arena
 
+[![CI](https://github.com/ashokCh-dev/hft-arena/actions/workflows/ci.yml/badge.svg)](https://github.com/ashokCh-dev/hft-arena/actions/workflows/ci.yml)
+
 **Distributed Benchmarking & Hosting Platform** for contestant-submitted trading
 infrastructure — IICPC Summer Hackathon 2026.
 

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Byte-compile services
+        run: python -m py_compile orchestrator/*.py bot_fleet/*.py telemetry/*.py
+      - name: Validate docker-compose
+        run: docker compose config >/dev/null
+      - name: Validate Kubernetes manifests (kustomize build)
+        run: kubectl kustomize k8s >/dev/null
+      - name: Build platform images
+        run: docker compose build orchestrator telemetry bot_fleet
+
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bring up the stack
+        run: docker compose up -d --build
+      - name: End-to-end smoke test
+        run: ./scripts/smoke.sh
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
