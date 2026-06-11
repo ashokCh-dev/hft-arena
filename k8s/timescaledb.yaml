@@ -1,0 +1,72 @@
+# Durable run history on Kubernetes (parity with the docker-compose stack).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arena-db
+  namespace: hft-arena
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: arena
+  DATABASE_URL: postgres://postgres:arena@timescaledb:5432/arena
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: arena-tsdb
+  namespace: hft-arena
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: timescaledb
+  namespace: hft-arena
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # single PVC — never run two at once
+  selector:
+    matchLabels: { app: timescaledb }
+  template:
+    metadata:
+      labels: { app: timescaledb }
+    spec:
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb:2.17.2-pg16
+          env:
+            - { name: POSTGRES_DB, value: arena }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: arena-db, key: POSTGRES_PASSWORD }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "postgres", "-d", "arena"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "1Gi" }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: arena-tsdb
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb
+  namespace: hft-arena
+spec:
+  selector: { app: timescaledb }
+  ports:
+    - port: 5432
+      targetPort: 5432

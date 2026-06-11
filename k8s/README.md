@@ -24,7 +24,9 @@ end-to-end (score, latency curve, auto-stop).
 |---|---|
 | `namespace.yaml` | `hft-arena` namespace |
 | `redis.yaml` | Redis Deployment + Service (metrics bus / state) |
-| `telemetry.yaml` | Telemetry ingester Deployment |
+| `timescaledb.yaml` | TimescaleDB Deployment + PVC + Service + Secret (durable run history) |
+| `telemetry.yaml` | Telemetry ingester Deployment (persists to TimescaleDB) |
+| `networkpolicy.yaml` | submission isolation (deny-all egress, fleet-only ingress) |
 | `bot-fleet.yaml` | Load generator Deployment + **HorizontalPodAutoscaler** |
 | `orchestrator.yaml` | Orchestrator Deployment + Service (ClusterIP :8000) |
 | `kustomization.yaml` | ties them together; pin image tags here |

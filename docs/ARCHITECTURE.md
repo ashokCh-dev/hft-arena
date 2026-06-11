@@ -255,7 +255,9 @@ submissions, all verified green:
   control plane → gRPC.
 - **Persistence/analytics** (✅ implemented): completed runs land in a TimescaleDB
   hypertable (with curve); leaderboard recovers on restart; `/history` lists recent
-  runs. Next: continuous aggregates for per-submission percentile trends over time.
+  runs. Shipped for **both** deployments — docker-compose and the k8s manifests
+  (`k8s/timescaledb.yaml`: Deployment + PVC + Secret), verified persisting +
+  recovering in-cluster. Next: continuous aggregates for percentile trends over time.
 - **Offered-load sweep + latency-vs-load curve** (✅ implemented). Scoring latency
   at a fixed reference load makes engines comparable; the curve shows each one's
   saturation knee. **Finding:** the sweep immediately exposed that the C++ engine

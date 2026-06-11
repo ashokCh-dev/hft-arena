@@ -47,7 +47,7 @@ async def connect():
         print("[telemetry] no DATABASE_URL — persistence disabled", flush=True)
         return None
     last = None
-    for attempt in range(20):                 # tolerate the DB still booting
+    for attempt in range(90):                 # tolerate first-boot initdb on a fresh PVC
         try:
             pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=4)
             async with pool.acquire() as c:

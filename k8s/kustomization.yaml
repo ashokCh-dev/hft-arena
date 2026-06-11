@@ -5,6 +5,7 @@ namespace: hft-arena
 resources:
   - namespace.yaml
   - redis.yaml
+  - timescaledb.yaml
   - telemetry.yaml
   - bot-fleet.yaml
   - orchestrator.yaml
