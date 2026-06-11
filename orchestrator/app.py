@@ -31,22 +31,42 @@ async def require_key(x_api_key: str = Header(default=None)):
     if ARENA_API_KEY and x_api_key != ARENA_API_KEY:
         raise HTTPException(status_code=401, detail="invalid or missing API key")
 
-CH_CONTROL = "arena:control"   # orchestrator -> bot_fleet
+CH_CONTROL = "arena:control"   # orchestrator -> bot_fleet (redis mode) + telemetry metadata
 CH_EVENTS = "arena:events"     # telemetry/orchestrator -> dashboard
 CH_RUNEVENTS = "arena:runevents"  # bot_fleet -> orchestrator (run finished)
 KEY_SNAPSHOT = "arena:snapshot"
+
+# Control transport for orchestrator->fleet commands: "redis" pub/sub or "grpc".
+CONTROL = os.environ.get("CONTROL", "redis")
 
 app = FastAPI(title="HFT Arena Orchestrator")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 r: aioredis.Redis = None
+_grpc = None          # ControlServicer when CONTROL == "grpc"
+_grpc_server = None   # keep a reference so the gRPC server isn't garbage-collected
 
 
 @app.on_event("startup")
 async def _startup():
-    global r
+    global r, _grpc, _grpc_server
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
-    asyncio.create_task(_runevents_listener())
+    if CONTROL == "grpc":
+        import control_grpc
+        _grpc = control_grpc.ControlServicer(on_done=_on_run_done)
+        _grpc_server = await control_grpc.serve(_grpc)
+    else:
+        asyncio.create_task(_runevents_listener())
+
+
+async def _on_run_done(run_id, submission_id):
+    """gRPC ReportDone handler: stop the sandbox and let telemetry persist."""
+    if submission_id:
+        await asyncio.to_thread(sandbox.stop, submission_id)
+    # telemetry persists off CH_RUNEVENTS regardless of control transport
+    await r.publish(CH_RUNEVENTS, json.dumps(
+        {"run_id": run_id, "submission_id": submission_id, "done": True}))
+    await publish_event({"status": "Run complete.", "running": False})
 
 
 async def _runevents_listener():
@@ -134,11 +154,19 @@ async def start_run(req: RunReq):
     # Tell telemetry which run/submission is live, then start the bot fleet.
     await publish_event({"status": f"Attacking {name}…", "running": True,
                          "submission": name})
-    await r.publish(CH_CONTROL, json.dumps({
-        "cmd": "start", "run_id": run_id, "submission": name,
-        "submission_id": req.submission_id, "target": target,
-        "bots": req.bots, "duration": req.duration,
-    }))
+    cmd = {"cmd": "start", "run_id": run_id, "submission": name,
+           "submission_id": req.submission_id, "target": target,
+           "bots": req.bots, "duration": req.duration}
+    # CH_CONTROL always carries the start so telemetry can label run_id->submission;
+    # in redis mode the fleet also consumes it. In grpc mode the fleet gets it over
+    # the gRPC stream instead.
+    await r.publish(CH_CONTROL, json.dumps(cmd))
+    if CONTROL == "grpc":
+        import arena_pb2
+        await _grpc.broadcast(arena_pb2.Command(
+            cmd="start", run_id=run_id, submission=name,
+            submission_id=req.submission_id, target=target,
+            bots=req.bots, duration=req.duration))
     # Primary stop is the fleet's run-done event; this is a generous safety net
     # in case a worker dies mid-run (the open-loop sweep makes run length dynamic).
     asyncio.create_task(_auto_stop(req.submission_id, req.duration + 180, name))
@@ -153,7 +181,11 @@ async def _auto_stop(submission_id: str, after: int, name: str):
 
 @app.post("/stop", dependencies=[Depends(require_key)])
 async def stop_all():
-    await r.publish(CH_CONTROL, json.dumps({"cmd": "stop"}))
+    if CONTROL == "grpc":
+        import arena_pb2
+        await _grpc.broadcast(arena_pb2.Command(cmd="stop"))
+    else:
+        await r.publish(CH_CONTROL, json.dumps({"cmd": "stop"}))
     return {"stopped": True}
 
 

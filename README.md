@@ -22,6 +22,7 @@ make demo                    # submit the Python reference engine and run a load
 ./scripts/demo.sh cpp 500 30 # or: submit the C++ engine, 500 bots, 30s
 make scale                   # scale the load generator to 3 coordinated workers
 TRANSPORT=kafka make up      # run the metrics firehose over Redpanda/Kafka instead of Redis
+CONTROL=grpc make up         # run the orchestrator<->fleet control plane over gRPC instead of Redis
 ./tests/adversarial.sh       # security/resilience suite: cheating, mem-bomb, crasher
 make down                    # stop everything
 # scaling proof: 1->3 bot workers took peak load ~91k -> ~180k ord/s (finding the

@@ -46,6 +46,11 @@ KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "redpanda:9092")
 SAMPLES_TOPIC = os.environ.get("SAMPLES_TOPIC", "arena.samples")
 PRODUCER = None        # AIOKafkaProducer when TRANSPORT == "kafka"
 
+# Control transport for orchestrator->fleet commands: "redis" pub/sub or "grpc".
+CONTROL = os.environ.get("CONTROL", "redis")
+ORCH_GRPC = os.environ.get("ORCH_GRPC", "orchestrator:50051")
+GRPC_STUB = None       # arena ControlStub when CONTROL == "grpc"
+
 # --- latency histogram (log-spaced microseconds) -------------------------------
 # Bucket mapping MUST stay in sync with telemetry/metrics.py.
 NBUCKETS = 256
@@ -304,8 +309,54 @@ async def run_load(cfg, r):
     # Only the leader signals run-done, so a fast replica can't stop the sandbox
     # out from under stragglers still draining their final orders.
     if is_leader:
-        await r.publish(CH_RUNEVENTS, json.dumps({
-            "run_id": run_id, "submission_id": cfg.get("submission_id"), "done": True}))
+        if CONTROL == "grpc":
+            import arena_pb2
+            await GRPC_STUB.ReportDone(arena_pb2.RunEvent(
+                run_id=run_id, submission_id=cfg.get("submission_id") or ""))
+        else:
+            await r.publish(CH_RUNEVENTS, json.dumps({
+                "run_id": run_id, "submission_id": cfg.get("submission_id"), "done": True}))
+
+
+async def _dispatch(cfg, r, current):
+    """Apply one start/stop command; returns the (possibly new) current task."""
+    if cfg.get("cmd") == "start":
+        if current and not current.done():
+            return current                # already running
+        return asyncio.create_task(run_load(cfg, r))
+    if cfg.get("cmd") == "stop" and current:
+        current.cancel()
+    return current
+
+
+async def _control_redis(r):
+    pubsub = r.pubsub()
+    await pubsub.subscribe(CH_CONTROL)
+    current = None
+    async for m in pubsub.listen():
+        if m.get("type") == "message":
+            current = await _dispatch(json.loads(m["data"]), r, current)
+
+
+async def _control_grpc(r):
+    """Subscribe to the orchestrator's gRPC command stream (reconnects on drop)."""
+    global GRPC_STUB
+    import grpc
+    import arena_pb2
+    import arena_pb2_grpc
+    current = None
+    while True:
+        try:
+            channel = grpc.aio.insecure_channel(ORCH_GRPC)
+            GRPC_STUB = arena_pb2_grpc.ControlStub(channel)
+            async for cmd in GRPC_STUB.Subscribe(arena_pb2.SubscribeRequest(worker=WORKER_ID)):
+                cfg = {"cmd": cmd.cmd, "run_id": cmd.run_id, "submission": cmd.submission,
+                       "submission_id": cmd.submission_id, "target": cmd.target,
+                       "bots": cmd.bots, "duration": cmd.duration}
+                current = await _dispatch(cfg, r, current)
+        except Exception as exc:
+            print(f"[bot_fleet:{WORKER_ID}] gRPC control reconnecting ({exc})", flush=True)
+            await asyncio.sleep(2)
 
 
 async def main():
@@ -317,21 +368,12 @@ async def main():
                                     linger_ms=20, acks=1)
         await PRODUCER.start()
         print(f"[bot_fleet:{WORKER_ID}] kafka producer -> {KAFKA_BOOTSTRAP}", flush=True)
-    pubsub = r.pubsub()
-    await pubsub.subscribe(CH_CONTROL)
     print(f"[bot_fleet:{WORKER_ID}] ready, BOTS_PER_WORKER={BOTS_PER_WORKER}, "
-          f"transport={TRANSPORT}", flush=True)
-    current = None
-    async for m in pubsub.listen():
-        if m.get("type") != "message":
-            continue
-        cfg = json.loads(m["data"])
-        if cfg.get("cmd") == "start":
-            if current and not current.done():
-                continue  # already running
-            current = asyncio.create_task(run_load(cfg, r))
-        elif cfg.get("cmd") == "stop" and current:
-            current.cancel()
+          f"transport={TRANSPORT}, control={CONTROL}", flush=True)
+    if CONTROL == "grpc":
+        await _control_grpc(r)
+    else:
+        await _control_redis(r)
 
 
 if __name__ == "__main__":

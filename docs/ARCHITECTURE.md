@@ -138,8 +138,11 @@ TimescaleDB (durable run history).
   sample firehose (bot_fleet → telemetry) runs over **Redis Streams** *or*
   **Redpanda/Kafka** (topic `arena.samples`, telemetry consumer group), matching
   the blueprint's "Kafka/Redpanda for metrics." Both verified end-to-end; the
-  record format is identical, so it's a true transport swap. Control could likewise
-  move to **gRPC** (see §7).
+  record format is identical, so it's a true transport swap.
+- **Control plane (pluggable, `CONTROL=redis|grpc`)** — orchestrator→fleet
+  start/stop commands and the fleet's run-done report run over Redis pub/sub *or*
+  **gRPC** (`proto/arena.proto`: `Control.Subscribe` server-stream + `ReportDone`),
+  matching the blueprint's gRPC mention. Both verified end-to-end.
 - **TimescaleDB** — durable analytics. Telemetry writes each *completed* run (with
   its full latency-vs-load curve as JSONB) to a `runs` hypertable on the run-done
   event. On startup it recovers the best-per-submission leaderboard from the DB, so
@@ -254,9 +257,10 @@ submissions, all verified green:
 
 ## 7. Roadmap (next iteration / "tomorrow")
 
-- **Transport** (✅ Kafka done): the metrics firehose is pluggable Redis Streams ↔
-  Redpanda/Kafka (`TRANSPORT=kafka`). Remaining: move the orchestrator↔fleet control
-  plane from Redis pub/sub to **gRPC**.
+- **Transport** (✅ done): metrics firehose is pluggable Redis Streams ↔ Redpanda/Kafka
+  (`TRANSPORT=kafka`); control plane is pluggable Redis pub/sub ↔ **gRPC** (`CONTROL=grpc`).
+  Every blueprint-named technology — gRPC, Kafka/Redpanda, TimescaleDB, Redis,
+  Kubernetes — is now represented and verified.
 - **Persistence/analytics** (✅ implemented): completed runs land in a TimescaleDB
   hypertable (with curve); leaderboard recovers on restart; `/history` lists recent
   runs. Shipped for **both** deployments — docker-compose and the k8s manifests

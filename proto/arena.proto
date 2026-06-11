@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package arena;
+
+// Control plane: the orchestrator streams run commands to fleet workers, and
+// workers report run completion back. (Coordination/state stay on Redis.)
+service Control {
+  // Fleet worker opens a long-lived stream and receives start/stop commands.
+  rpc Subscribe(SubscribeRequest) returns (stream Command);
+  // Fleet leader reports a finished run so the orchestrator can stop the sandbox.
+  rpc ReportDone(RunEvent) returns (Ack);
+}
+
+message SubscribeRequest {
+  string worker = 1;
+}
+
+message Command {
+  string cmd = 1;            // "start" | "stop"
+  string run_id = 2;
+  string submission = 3;
+  string submission_id = 4;
+  string target = 5;
+  int32 bots = 6;
+  int32 duration = 7;
+}
+
+message RunEvent {
+  string run_id = 1;
+  string submission_id = 2;
+}
+
+message Ack {
+  bool ok = 1;
+}

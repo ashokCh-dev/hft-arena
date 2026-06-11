@@ -2,3 +2,5 @@ websockets>=12,<13
 redis==5.2.1
 uvloop==0.21.0
 aiokafka==0.11.0
+grpcio==1.81.1
+protobuf==6.33.6
