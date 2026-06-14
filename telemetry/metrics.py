@@ -148,10 +148,13 @@ class Agg:
         correctness = self.correctness()
         throughput_norm = min(1.0, self.peak_tps / TARGET_TPS) if TARGET_TPS else 0.0
         latency_score = LAT_REF_US / (LAT_REF_US + p99) if p99 > 0 else 0.0
-        reliability = (self.acked / self.sent) if self.sent else 1.0
-        crash_penalty = 0.3 if (self.sent > 0 and reliability < 0.5) else 0.0
-        score = max(0.0, 0.45 * throughput_norm + 0.35 * latency_score
-                    + 0.20 * correctness - crash_penalty)
+        # Correctness MULTIPLIES the performance score: an incorrect or unreliable
+        # matching engine is worthless at any speed, so it sinks the whole score
+        # (a fast-but-wrong engine -> ~0). performance in [0,1]; correctness in [0,1].
+        # (Correctness already folds in reliability = acked/sent, so the old additive
+        # crash_penalty is subsumed and dropped.)
+        performance = 0.6 * throughput_norm + 0.4 * latency_score
+        score = correctness * performance
         return {
             "submission": self.submission,
             "run_id": self.run_id,
@@ -166,6 +169,7 @@ class Agg:
             "acked": self.acked,
             "errors": self.errors,
             "correctness": round(correctness, 4),
+            "performance": round(performance, 4),   # speed+latency, before correctness gate
             "score": round(score * 1000, 1),
             "curve": pts,
         }

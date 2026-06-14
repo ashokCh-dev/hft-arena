@@ -185,24 +185,24 @@ languages still pass price-time-priority correctness.
 Per run, the composite score (×1000 for display) is:
 
 ```
-score = 0.45 · throughput_norm
-      + 0.35 · latency_score
-      + 0.20 · correctness
-      − crash_penalty
+score = correctness · performance · 1000          # correctness GATES performance
 
-throughput_norm = min(1, peak_tps / TARGET_TPS)          # TARGET_TPS=100000
-latency_score   = LAT_REF_US / (LAT_REF_US + p99_us)      # LAT_REF_US=2000
+performance     = 0.6 · throughput_norm + 0.4 · latency_score   # speed+latency, [0,1]
+throughput_norm = min(1, peak_tps / TARGET_TPS)                 # TARGET_TPS=100000
+latency_score   = LAT_REF_US / (LAT_REF_US + p99_us)            # LAT_REF_US=2000
                                 # p99 from the curve point at a FIXED REF_LOAD
                                 # (=10k ord/s) so engines compare apples-to-apples;
                                 # the full curve still shows each engine's own knee
-correctness     = (corr_pass/corr_total) · (acked/sent)   # priority × reliability
-crash_penalty   = 0.3 if reliability < 0.5 else 0
+correctness     = (corr_pass/corr_total) · (acked/sent)         # priority × reliability
 ```
 
-- **throughput_norm** rewards peak sustained TPS before failure.
-- **latency_score** rewards low tail latency (p99).
-- **correctness** = price-time-priority pass rate × order acknowledgement rate.
-- **crash_penalty** punishes engines that drop a large fraction of orders.
+- **performance** rewards peak sustained TPS (`throughput_norm`) and low tail latency
+  (`latency_score`).
+- **correctness multiplies it** — price-time-priority pass rate × order-ack reliability.
+  Because an incorrect or unreliable matching engine is worthless at any speed, a
+  fast-but-wrong engine collapses to **~0** (the cheating engine scores 0, not ~600).
+  This also subsumes the old additive `crash_penalty`: a crashing engine has low
+  `acked/sent` → low correctness → its whole score is scaled down.
 
 **Correctness validation.** A probe runs on the *empty* book before load begins
 (a Redis `NX` lock elects one fleet worker; the rest wait on a done-flag). It

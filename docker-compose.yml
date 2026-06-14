@@ -76,7 +76,7 @@ services:
       DATABASE_URL: postgres://postgres:arena@timescaledb:5432/arena
       TARGET_TPS: "100000"     # peak TPS that earns the full throughput sub-score
       LAT_REF_US: "2000"       # p99 reference for the latency sub-score (at REF_LOAD)
-      REF_LOAD: "10000"        # fixed offered load (ord/s) latency is scored at
+      REF_LOAD: "${REF_LOAD:-10000}"        # fixed offered load (ord/s) latency is scored at
       TRANSPORT: "${TRANSPORT:-redis}"   # metrics transport: redis | kafka
       KAFKA_BOOTSTRAP: redpanda:9092
     depends_on:
