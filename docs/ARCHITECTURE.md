@@ -168,6 +168,16 @@ Engine → bot:
 Latency is measured by the bot as `ack_receipt − send_time` (nanoseconds). The
 ack must be sent before fills so latency reflects acknowledgement, not matching.
 
+**Wire format (pluggable, `WIRE=json|binary`).** The above is JSON mode.
+`WIRE=binary` switches the hot path to a fixed-layout little-endian packed struct
+over WebSocket *binary* frames (REQ 26B, ACK 17B, FILL 25B — see
+`bot_fleet/wire.py`), removing JSON parse/serialize so the benchmark measures the
+matching engine, not the parser (as real HFT binary protocols do). Every reference
+engine **auto-detects** the frame type (binary in → binary out, text in → JSON), so
+one engine serves both. Measured: binary roughly **halves p50 latency** on the
+wire-bound engines (C++ 2.4 ms → 1.06 ms, Go 1.28 ms → 0.83 ms) while all four
+languages still pass price-time-priority correctness.
+
 ---
 
 ## 5. Scoring model

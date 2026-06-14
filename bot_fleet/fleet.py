@@ -21,6 +21,11 @@ import redis.asyncio as aioredis
 import websockets
 
 import scenarios
+import wire
+
+# Order wire format: "json" (text frames) or "binary" (packed structs, binary
+# frames) — see wire.py. Binary removes JSON from the hot path for max TPS.
+WIRE = os.environ.get("WIRE", "json")
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
 BOTS_PER_WORKER = int(os.environ.get("BOTS_PER_WORKER", "250"))
@@ -79,17 +84,25 @@ MAX_OUTSTANDING = 512   # open-loop overload guard (drop rather than unbounded q
 def _build_order(cur):
     roll = random.random()
     if roll < 0.85:        # limit near mid
-        side = "buy" if random.random() < 0.5 else "sell"
+        buy = random.random() < 0.5
         px = 15000 + random.randint(-20, 20)
+        qty = random.randint(1, 10)
+        if WIRE == "binary":
+            return wire.enc_limit(cur, buy, px, qty)
         return ('{"t":"limit","id":%d,"side":"%s","px":%d,"qty":%d}'
-                % (cur, side, px, random.randint(1, 10)))
+                % (cur, "buy" if buy else "sell", px, qty))
     elif roll < 0.95:      # market
-        side = "buy" if random.random() < 0.5 else "sell"
+        buy = random.random() < 0.5
+        qty = random.randint(1, 5)
+        if WIRE == "binary":
+            return wire.enc_market(cur, buy, qty)
         return ('{"t":"market","id":%d,"side":"%s","qty":%d}'
-                % (cur, side, random.randint(1, 5)))
+                % (cur, "buy" if buy else "sell", qty))
     else:                  # cancel a recent order
-        return ('{"t":"cancel","id":%d,"target":%d}'
-                % (cur, cur - random.randint(1, 50)))
+        target = cur - random.randint(1, 50)
+        if WIRE == "binary":
+            return wire.enc_cancel(cur, target)
+        return ('{"t":"cancel","id":%d,"target":%d}' % (cur, target))
 
 
 class LoadState:
@@ -117,17 +130,24 @@ async def bot(target, stats, stop_event, deadline, mode="closed", state=None):
             async def receiver():
                 nonlocal outstanding
                 while True:
-                    m = json.loads(await ws.recv())
-                    if "ack" in m:
-                        t0 = send_times.pop(m["ack"], None)
-                        if t0 is not None:
-                            lat_us = (time.perf_counter_ns() - t0) / 1000.0
-                            stats.hist[bucket_of(lat_us)] += 1
-                            stats.acked += 1
-                            outstanding -= 1
-                        if mode == "closed":
-                            sem.release()
-                    # fills ignored by load bots (correctness handled by scenarios)
+                    data = await ws.recv()
+                    if WIRE == "binary":
+                        if data[0] != wire.T_ACK:   # ignore fills on load bots
+                            continue
+                        ack_id = wire.dec_ack(data)[0]
+                    else:
+                        m = json.loads(data)
+                        if "ack" not in m:
+                            continue
+                        ack_id = m["ack"]
+                    t0 = send_times.pop(ack_id, None)
+                    if t0 is not None:
+                        lat_us = (time.perf_counter_ns() - t0) / 1000.0
+                        stats.hist[bucket_of(lat_us)] += 1
+                        stats.acked += 1
+                        outstanding -= 1
+                    if mode == "closed":
+                        sem.release()
 
             rx = asyncio.create_task(receiver())
             t_next = time.monotonic()
@@ -272,7 +292,7 @@ async def run_load(cfg, r):
     is_leader = bool(await r.set(lock_key, WORKER_ID, nx=True, ex=budget))
     if is_leader:
         await asyncio.sleep(1.5)                  # barrier: let all replicas register
-        await scenarios.run(target, stats, iterations=10)
+        await scenarios.run(target, stats, iterations=10, wire_mode=WIRE)
         await r.set(done_key, "1", ex=budget)
         # Transmit the correctness results NOW. The per-phase reporters baseline
         # their counters at creation (after this point), so they would never send

@@ -108,6 +108,40 @@ async fn main() {
             };
             let (mut write, mut read) = ws.split();
             while let Some(Ok(msg)) = read.next().await {
+                // Binary frame -> packed-struct protocol (LE), else JSON (auto-detect).
+                if let Message::Binary(d) = &msg {
+                    if d.len() < 26 { continue; }
+                    let mtype = d[0];
+                    let side = d[1];
+                    let id = u64::from_le_bytes(d[2..10].try_into().unwrap());
+                    let px = i32::from_le_bytes(d[10..14].try_into().unwrap()) as i64;
+                    let qty = i32::from_le_bytes(d[14..18].try_into().unwrap()) as i64;
+                    let target = u64::from_le_bytes(d[18..26].try_into().unwrap());
+                    let mut ack = Vec::with_capacity(17);
+                    ack.push(1u8);
+                    ack.extend_from_slice(&id.to_le_bytes());
+                    ack.extend_from_slice(&(now_ns() as u64).to_le_bytes());
+                    let _ = write.send(Message::Binary(ack)).await;
+                    let buy = side == 0;
+                    let fills = {
+                        let mut b = book.lock().await;
+                        match mtype {
+                            1 => b.limit(id, buy, px, qty),
+                            2 => b.market(buy, qty),
+                            _ => { b.cancel(target); Vec::new() }
+                        }
+                    };
+                    for (fpx, fq, maker) in fills {
+                        let mut fb = Vec::with_capacity(25);
+                        fb.push(2u8);
+                        fb.extend_from_slice(&id.to_le_bytes());
+                        fb.extend_from_slice(&(fpx as i32).to_le_bytes());
+                        fb.extend_from_slice(&(fq as i32).to_le_bytes());
+                        fb.extend_from_slice(&maker.to_le_bytes());
+                        let _ = write.send(Message::Binary(fb)).await;
+                    }
+                    continue;
+                }
                 if let Message::Text(txt) = msg {
                     let v: Value = match serde_json::from_str(&txt) { Ok(x) => x, Err(_) => continue };
                     let id = v["id"].as_u64().unwrap_or(0);

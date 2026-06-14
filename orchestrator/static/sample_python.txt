@@ -21,10 +21,18 @@ price-time priority (resting orders at a price fill in arrival order).
 import asyncio
 import json
 import os
+import struct
 import time
 from bisect import insort
 
 import websockets
+
+# Binary wire (auto-detected from binary frames): LE packed, no padding.
+#   REQ 26B: B type, B side, Q id, i px, i qty, Q target  (type 1=limit 2=market 3=cancel)
+#   ACK 17B: B 1, Q id, Q ts        FILL 25B: B 2, Q id, i px, i qty, Q maker
+_REQ = struct.Struct("<BBQiiQ")
+_ACK = struct.Struct("<BQQ")
+_FILL = struct.Struct("<BQiiQ")
 
 
 class OrderBook:
@@ -124,6 +132,21 @@ BOOK = OrderBook()
 
 async def handle(ws, *_):
     async for raw in ws:
+        # Binary frame -> binary protocol; text frame -> JSON (auto-detect).
+        if isinstance(raw, (bytes, bytearray)):
+            mtype, side, oid, px, qty, target = _REQ.unpack(raw)
+            await ws.send(_ACK.pack(1, oid, time.time_ns()))   # ack first
+            if mtype == 1:
+                fills = BOOK.limit(oid, "buy" if side == 0 else "sell", px, qty)
+            elif mtype == 2:
+                fills = BOOK.market(oid, "buy" if side == 0 else "sell", qty)
+            else:
+                BOOK.cancel(target)
+                fills = []
+            for fpx, fq, maker in fills:
+                await ws.send(_FILL.pack(2, oid, fpx, fq, maker))
+            continue
+
         try:
             m = json.loads(raw)
             t = m["t"]

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 #include <list>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -112,7 +113,45 @@ int main() {
         .websocket(&app)
         .onopen([](crow::websocket::connection &) {})
         .onclose([](crow::websocket::connection &, const std::string &, uint16_t) {})
-        .onmessage([](crow::websocket::connection &conn, const std::string &data, bool) {
+        .onmessage([](crow::websocket::connection &conn, const std::string &data, bool is_binary) {
+            // Binary frame -> packed-struct protocol (LE): B type,B side,Q id,i px,
+            // i qty,Q target. ACK: B1,Q id,Q ts. FILL: B2,Q id,i px,i qty,Q maker.
+            if (is_binary) {
+                const char *p = data.data();
+                uint8_t mtype = (uint8_t)p[0], side = (uint8_t)p[1];
+                uint64_t id, target;
+                int32_t px, qty;
+                std::memcpy(&id, p + 2, 8);
+                std::memcpy(&px, p + 10, 4);
+                std::memcpy(&qty, p + 14, 4);
+                std::memcpy(&target, p + 18, 8);
+                char ack[17];
+                ack[0] = 1;
+                long long ts = now_ns();
+                std::memcpy(ack + 1, &id, 8);
+                std::memcpy(ack + 9, &ts, 8);
+                conn.send_binary(std::string(ack, 17));
+                std::vector<Fill> fills;
+                {
+                    std::lock_guard<std::mutex> lk(BOOK_MTX);
+                    if (mtype == 1) fills = BOOK.limit(id, side == 0, px, qty);
+                    else if (mtype == 2) fills = BOOK.market(id, side == 0, qty);
+                    else BOOK.cancel(target);
+                }
+                for (auto &f : fills) {
+                    char fb[25];
+                    fb[0] = 2;
+                    int32_t fpx = (int32_t)f.px, fq = (int32_t)f.qty;
+                    uint64_t mk = f.maker;
+                    std::memcpy(fb + 1, &id, 8);
+                    std::memcpy(fb + 9, &fpx, 4);
+                    std::memcpy(fb + 13, &fq, 4);
+                    std::memcpy(fb + 17, &mk, 8);
+                    conn.send_binary(std::string(fb, 25));
+                }
+                return;
+            }
+
             auto m = crow::json::load(data);
             if (!m) return;
             uint64_t id = m["id"].u();

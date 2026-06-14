@@ -9,30 +9,53 @@ the book is clean, the outcome is deterministic. Each iteration:
   3. aggress SELL 6 @ PX          -> a correct engine fills A(5) THEN B(1)
 
 We assert the taker's fills are exactly [(maker_A,5),(maker_B,1)] in that order.
-A wrong engine (bad priority or bad fill math) fails the assertion.
+A wrong engine (bad priority or bad fill math) fails the assertion. Works over
+either wire format (json text or binary frames).
 """
 import asyncio
 import json
 
 import websockets
 
+import wire
+
 SCEN_ID_BASE = 1_000_000_000_000_000  # disjoint from load-bot order ids
 
 
-async def _expect_fills(ws, taker_id, n):
+def _limit(wire_mode, oid, buy, px, qty):
+    if wire_mode == "binary":
+        return wire.enc_limit(oid, buy, px, qty)
+    return json.dumps({"t": "limit", "id": oid,
+                       "side": "buy" if buy else "sell", "px": px, "qty": qty})
+
+
+def _cancel(wire_mode, oid, target):
+    if wire_mode == "binary":
+        return wire.enc_cancel(oid, target)
+    return json.dumps({"t": "cancel", "id": oid, "target": target})
+
+
+async def _expect_fills(ws, taker_id, n, wire_mode):
     got = []
     while len(got) < n:
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
         except asyncio.TimeoutError:
             break
-        m = json.loads(raw)
-        if "fill" in m and m["fill"] == taker_id:
-            got.append((m["maker"], m["qty"]))
+        if wire_mode == "binary":
+            if raw[0] != wire.T_FILL:
+                continue
+            oid, _px, qty, maker = wire.dec_fill(raw)
+            if oid == taker_id:
+                got.append((maker, qty))
+        else:
+            m = json.loads(raw)
+            if "fill" in m and m["fill"] == taker_id:
+                got.append((m["maker"], m["qty"]))
     return got
 
 
-async def run(target, stats, iterations=10):
+async def run(target, stats, iterations=10, wire_mode="json"):
     """Run a fixed number of correctness iterations on the clean book."""
     try:
         async with websockets.connect(target, ping_interval=None,
@@ -42,22 +65,19 @@ async def run(target, stats, iterations=10):
                 a = SCEN_ID_BASE + it * 10 + 1
                 b = SCEN_ID_BASE + it * 10 + 2
                 c = SCEN_ID_BASE + it * 10 + 3
-                await ws.send(json.dumps({"t": "limit", "id": a, "side": "buy",
-                                          "px": px, "qty": 5}))
+                await ws.send(_limit(wire_mode, a, True, px, 5))
                 await ws.recv()                      # ack A
-                await ws.send(json.dumps({"t": "limit", "id": b, "side": "buy",
-                                          "px": px, "qty": 5}))
+                await ws.send(_limit(wire_mode, b, True, px, 5))
                 await ws.recv()                      # ack B
-                await ws.send(json.dumps({"t": "limit", "id": c, "side": "sell",
-                                          "px": px, "qty": 6}))
+                await ws.send(_limit(wire_mode, c, False, px, 6))
                 await ws.recv()                      # ack C
-                fills = await _expect_fills(ws, c, 2)
+                fills = await _expect_fills(ws, c, 2, wire_mode)
 
                 stats.corr_total += 1
                 if fills == [(a, 5), (b, 1)]:
                     stats.corr_pass += 1
                 # cancel leftover maker B (qty 4) to keep the book clean
-                await ws.send(json.dumps({"t": "cancel", "id": c + 1, "target": b}))
+                await ws.send(_cancel(wire_mode, c + 1, b))
                 try:
                     await asyncio.wait_for(ws.recv(), timeout=1.0)
                 except asyncio.TimeoutError:

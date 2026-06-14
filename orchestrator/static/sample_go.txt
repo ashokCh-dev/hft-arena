@@ -10,6 +10,7 @@ package main
 
 import (
 	"container/list"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"sort"
@@ -187,9 +188,43 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.Close()
 	for {
-		_, data, err := c.ReadMessage()
+		mt, data, err := c.ReadMessage()
 		if err != nil {
 			return
+		}
+		// Binary frame -> packed-struct protocol (LE), else JSON (auto-detect).
+		if mt == websocket.BinaryMessage {
+			mtype, side := data[0], data[1]
+			id := binary.LittleEndian.Uint64(data[2:10])
+			px := int32(binary.LittleEndian.Uint32(data[10:14]))
+			qty := int32(binary.LittleEndian.Uint32(data[14:18]))
+			target := binary.LittleEndian.Uint64(data[18:26])
+			ack := make([]byte, 17)
+			ack[0] = 1
+			binary.LittleEndian.PutUint64(ack[1:9], id)
+			binary.LittleEndian.PutUint64(ack[9:17], uint64(time.Now().UnixNano()))
+			c.WriteMessage(websocket.BinaryMessage, ack)
+			var bfills []fill
+			book.mu.Lock()
+			switch mtype {
+			case 1:
+				bfills = book.limit(id, side == 0, int(px), int(qty))
+			case 2:
+				bfills = book.market(id, side == 0, int(qty))
+			case 3:
+				book.cancel(target)
+			}
+			book.mu.Unlock()
+			for _, f := range bfills {
+				fb := make([]byte, 25)
+				fb[0] = 2
+				binary.LittleEndian.PutUint64(fb[1:9], id)
+				binary.LittleEndian.PutUint32(fb[9:13], uint32(int32(f.px)))
+				binary.LittleEndian.PutUint32(fb[13:17], uint32(int32(f.qty)))
+				binary.LittleEndian.PutUint64(fb[17:25], f.maker)
+				c.WriteMessage(websocket.BinaryMessage, fb)
+			}
+			continue
 		}
 		var m msg
 		if json.Unmarshal(data, &m) != nil {

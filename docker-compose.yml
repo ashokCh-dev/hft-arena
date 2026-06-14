@@ -100,6 +100,7 @@ services:
       KAFKA_BOOTSTRAP: redpanda:9092
       CONTROL: "${CONTROL:-redis}"       # control plane: redis | grpc
       ORCH_GRPC: orchestrator:50051
+      WIRE: "${WIRE:-json}"              # order wire format: json | binary (packed structs)
     depends_on:
       redis:
         condition: service_healthy
