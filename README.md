@@ -26,7 +26,8 @@ make scale                   # scale the load generator to 3 coordinated workers
 TRANSPORT=kafka make up      # run the metrics firehose over Redpanda/Kafka instead of Redis
 CONTROL=grpc make up         # run the orchestrator<->fleet control plane over gRPC instead of Redis
 WIRE=binary make up          # packed-struct binary wire (~2x lower p50) instead of JSON
-./tests/adversarial.sh       # security/resilience suite: cheating, mem-bomb, crasher
+make adversarial             # Chaos & Resilience — submission chaos: cheating, mem-bomb, crasher, bursty
+make chaos                   # Chaos & Resilience — platform chaos: kill telemetry mid-run, prove self-heal
 make down                    # stop everything
 # scaling proof: 1->3 bot workers took peak load ~91k -> ~180k ord/s (finding the
 # C++ engine's true ceiling) while the latency curve's offered axis stayed correct.
@@ -52,6 +53,8 @@ duration, and hit **Deploy & Attack** — or click **Load Python reference** fir
 | `k8s/` | Kubernetes manifests (kustomize): Deployments, Services, RBAC, bot-fleet **HPA** |
 | `terraform/` | cloud cluster skeleton (GKE + autoscaling node pool) |
 | `docs/ARCHITECTURE.md` | architecture blueprint (microservices, protocols, scoring, isolation) |
+| `docs/adr/` | Architecture Decision Records — the *why* behind the key decisions |
+| `tests/` | **Chaos & Resilience** — submission chaos (`adversarial.sh`) + platform chaos (`chaos.sh`) |
 
 ## Submission contract
 

@@ -254,9 +254,11 @@ isolation either way:
   Kaniko are the remaining piece; today the k8s backend runs a prebuilt reference
   image.) RBAC for it is in `k8s/orchestrator.yaml`.
 
-### Adversarial verification (`tests/adversarial.sh`)
-The Sandboxing + Validation defenses are continuously tested against hostile
-submissions, all verified green:
+### Chaos & Resilience Engineering
+Two complementary suites attack the system from both sides and prove it holds up.
+
+**Submission chaos** (`tests/adversarial.sh`) — the Sandboxing + Validation defenses,
+tested against hostile *submissions*, all verified green:
 
 | Attack (`tests/adversarial/`) | Defense proven |
 |---|---|
@@ -271,6 +273,15 @@ submissions, all verified green:
 > the sweep refactor moved the probe ahead of the per-phase reporters). The leader
 > now emits the probe's counts explicitly. A benchmark you don't attack is a
 > benchmark you don't actually trust.
+
+**Platform chaos** (`tests/chaos.sh`) — failure injection against the *platform
+itself*: `docker kill` the telemetry aggregator mid-run and assert that (1) the rest
+of the platform keeps running, (2) telemetry comes back (the `restart: unless-stopped`
+policy auto-heals genuine crashes; a Kubernetes Deployment recreates the pod), and
+(3) on restart it reconnects to Redis + TimescaleDB and **recovers the full
+leaderboard from the DB** — no loss of finished runs. All four checks green.
+
+> Design notes for these decisions live as ADRs in [`adr/`](adr/).
 
 ---
 

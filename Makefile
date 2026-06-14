@@ -1,4 +1,4 @@
-.PHONY: up down build demo logs ps scale clean
+.PHONY: up down build demo logs ps scale clean chaos adversarial
 
 # Bring the platform online (redis, orchestrator, telemetry, bot_fleet)
 up:
@@ -19,6 +19,15 @@ demo:
 # Prove the load generator is distributed by scaling bot workers.
 scale:
 	docker compose up -d --scale bot_fleet=3
+
+# Chaos & Resilience Engineering ----------------------------------------------
+# adversarial: chaos-test the SUBMISSION (cheating/hostile/crashing engines).
+adversarial:
+	./tests/adversarial.sh
+
+# chaos: chaos-test the PLATFORM (kill telemetry mid-run, prove it self-heals).
+chaos:
+	./tests/chaos.sh
 
 ps:
 	docker compose ps
