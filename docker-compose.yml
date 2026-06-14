@@ -77,6 +77,7 @@ services:
       TARGET_TPS: "100000"     # peak TPS that earns the full throughput sub-score
       LAT_REF_US: "2000"       # p99 reference for the latency sub-score (at REF_LOAD)
       REF_LOAD: "${REF_LOAD:-10000}"        # fixed offered load (ord/s) latency is scored at
+      TREND_BUCKET: "${TREND_BUCKET:-1 minute}"  # continuous-aggregate bucket for percentile/jitter trends
       TRANSPORT: "${TRANSPORT:-redis}"   # metrics transport: redis | kafka
       KAFKA_BOOTSTRAP: redpanda:9092
     depends_on:
@@ -96,6 +97,9 @@ services:
       SWEEP_RATES: "5000,10000,20000,40000,80000"  # open-loop offered-load sweep (ord/s)
       STEP_SECS: "4"           # seconds per sweep step
       SWEEP_BOTS: "120"        # bot pool size during the sweep
+      BURST_RATES: "${BURST_RATES:-10000,20000,40000}"  # microburst sweep mean rates (ord/s); "" disables
+      BURST_SIZE: "${BURST_SIZE:-20}"     # orders per microburst, per bot
+      BURST_STEP_SECS: "${BURST_STEP_SECS:-3}"  # seconds per burst step
       TRANSPORT: "${TRANSPORT:-redis}"   # metrics transport: redis | kafka
       KAFKA_BOOTSTRAP: redpanda:9092
       CONTROL: "${CONTROL:-redis}"       # control plane: redis | grpc

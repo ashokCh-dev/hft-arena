@@ -75,7 +75,8 @@ class Agg:
         self.corr_pass = 0
         self.corr_total = 0
         self.peak_tps = 0.0
-        self.rates = {}            # offered_rate -> RateBin (open-loop sweep points)
+        self.rates = {}            # offered_rate -> RateBin (open-loop STEADY sweep points)
+        self.burst_rates = {}      # avg_rate -> RateBin (open-loop MICROBURST sweep points)
         self._win = deque()        # (t, cum_sent) for sliding TPS in the closed phase
         self.last_update = time.time()
 
@@ -86,11 +87,14 @@ class Agg:
         self.errors += errors
         self.corr_pass += corr_pass
         self.corr_total += corr_total
-        if phase == "open" and rate > 0:
+        if rate > 0 and phase in ("open", "burst"):
             # Latency curve point for this offered rate. Open-loop pacing means
             # low-load points reflect true service time; high-load points reveal
-            # the saturation knee.
-            self.rates.setdefault(rate, RateBin()).add(sent, acked, hist_delta, ts)
+            # the saturation knee. The "burst" phase offers the SAME average rate
+            # but in microbursts (tight bursts + idle gaps), so its curve exposes
+            # the queueing/jitter a steady sweep at the same mean rate hides.
+            bins = self.rates if phase == "open" else self.burst_rates
+            bins.setdefault(rate, RateBin()).add(sent, acked, hist_delta, ts)
         self.last_update = time.time()
 
     def tps(self) -> float:
@@ -112,16 +116,23 @@ class Agg:
         reliability = (self.acked / self.sent) if self.sent else 1.0
         return priority * reliability
 
-    def curve(self):
+    @staticmethod
+    def _curve(bins):
         """Sorted latency-vs-load points: [{offered, achieved, p50, p90, p99}]."""
         pts = []
-        for offered in sorted(self.rates):
-            b = self.rates[offered]
+        for offered in sorted(bins):
+            b = bins[offered]
             p50, p90, p99 = _percentiles(b.hist)
             pts.append({"offered": offered, "achieved": round(b.achieved_tps()),
                         "p50_us": round(p50, 1), "p90_us": round(p90, 1),
                         "p99_us": round(p99, 1)})
         return pts
+
+    def curve(self):
+        return self._curve(self.rates)
+
+    def burst_curve(self):
+        return self._curve(self.burst_rates)
 
     def _ref_point(self, pts):
         """Curve point nearest the fixed REF_LOAD — the apples-to-apples score load."""
@@ -144,6 +155,17 @@ class Agg:
         p50 = rp["p50_us"] if rp else 0.0
         p90 = rp["p90_us"] if rp else 0.0
         p99 = rp["p99_us"] if rp else 0.0
+        # Latency JITTER proxy: tail spread (p99 - p50) at the reference load. A
+        # well-behaved engine keeps this small; queueing under load fans it out.
+        jitter = round(max(0.0, p99 - p50), 1)
+
+        # Microburst phase, measured at the same reference load as the steady sweep
+        # so burst_p99 vs p99 is an apples-to-apples "tail blow-up under bursts".
+        burst_pts = self.burst_curve()
+        brp = self._ref_point(burst_pts)
+        burst_p50 = brp["p50_us"] if brp else 0.0
+        burst_p99 = brp["p99_us"] if brp else 0.0
+        burst_jitter = round(max(0.0, burst_p99 - burst_p50), 1)
 
         correctness = self.correctness()
         throughput_norm = min(1.0, self.peak_tps / TARGET_TPS) if TARGET_TPS else 0.0
@@ -163,6 +185,10 @@ class Agg:
             "p99_us": round(p99, 1),
             "ref_load": rp["offered"] if rp else 0,          # offered rate latency is scored at
             "max_sustained_tps": self._max_sustained(pts),   # informational: knee location
+            "jitter_us": jitter,                             # tail spread (p99-p50) @ ref load
+            "burst_p50_us": round(burst_p50, 1),             # microburst phase @ same ref load
+            "burst_p99_us": round(burst_p99, 1),
+            "burst_jitter_us": burst_jitter,                 # tail spread under microbursts
             "tps": round(cur_tps),
             "peak_tps": round(self.peak_tps),
             "sent": self.sent,
@@ -172,4 +198,5 @@ class Agg:
             "performance": round(performance, 4),   # speed+latency, before correctness gate
             "score": round(score * 1000, 1),
             "curve": pts,
+            "burst_curve": burst_pts,
         }

@@ -86,6 +86,25 @@ echo "     legit correctness = ${CORR:-none}"
 python3 -c "import sys; sys.exit(0 if float('${CORR:-0}')>0.8 else 1)" \
   && ok "legit engine scores correctly (correctness $CORR > 0.8)" \
   || bad "legit engine degraded (correctness=$CORR)"
+curl -s -X POST "$BASE/stop" >/dev/null; sleep 2
+
+# ---- Test 5: bursty order patterns (not just steady sweeps) -----------------
+echo ""; echo "[5] Bursty/adversarial order flow — microburst phase must measure tail/jitter"
+SID=$(submit python burst-target "$ROOT/reference_engine_py/engine.py")
+run "$SID" 200 4
+# Run = steady sweep -> MICROBURST sweep -> closed; wait for the burst phase to report.
+BURST=; STEADY=
+for _ in $(seq 1 30); do
+  BURST=$(row burst-target burst_p99_us); STEADY=$(row burst-target p99_us)
+  python3 -c "import sys; sys.exit(0 if float('${BURST:-0}')>0 else 1)" && break
+  sleep 2
+done
+echo "     steady p99=${STEADY:-none} µs   burst p99=${BURST:-none} µs"
+python3 -c "import sys; sys.exit(0 if float('${BURST:-0}')>0 else 1)" \
+  && ok "platform exercised bursty flow & measured a burst tail (burst p99=${BURST} µs)" \
+  || bad "no burst-phase tail measured (burst p99=${BURST:-none})"
+platform_healthy && ok "platform healthy under bursty/microburst load" \
+  || bad "a platform service went down under bursty load"
 curl -s -X POST "$BASE/stop" >/dev/null
 
 echo ""; echo "=================================================================="

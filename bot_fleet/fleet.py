@@ -39,6 +39,18 @@ STEP_SECS = float(os.environ.get("STEP_SECS", "4"))     # seconds per sweep step
 SWEEP_BOTS = int(os.environ.get("SWEEP_BOTS", "120"))   # bot pool for the sweep
 WORKER_ID = os.environ.get("HOSTNAME", socket.gethostname())
 
+# Microburst phase: real order flow is bursty (quote storms, coordinated reactions
+# to a print), not a smooth Poisson trickle. After the steady sweep we re-offer a
+# few rates as microbursts — each bot fires BURST_SIZE orders back-to-back, then
+# idles, so the MEAN offered rate matches the steady sweep but the instantaneous
+# rate spikes. Tagged phase="burst" so telemetry bins it on a separate curve and
+# we can see the tail/jitter blow-up a steady sweep at the same mean rate hides.
+# Set BURST_RATES="" to disable.
+BURST_RATES = [int(x) for x in
+               os.environ.get("BURST_RATES", "10000,20000,40000").split(",") if x.strip()]
+BURST_STEP_SECS = float(os.environ.get("BURST_STEP_SECS", "3"))  # seconds per burst step
+BURST_SIZE = int(os.environ.get("BURST_SIZE", "20"))    # orders per microburst, per bot
+
 CH_CONTROL = "arena:control"
 CH_RUNEVENTS = "arena:runevents"
 STREAM = "arena:samples"
@@ -108,16 +120,19 @@ def _build_order(cur):
 class LoadState:
     """Mutable pacing knob the run loop adjusts while open-loop bots keep running."""
     def __init__(self):
-        self.interval = 1.0      # per-bot seconds between sends (open-loop)
+        self.interval = 1.0      # per-bot seconds between sends/bursts (open-loop)
+        self.burst = 1           # orders per wake-up: 1 = steady, >1 = microburst
 
 
 async def bot(target, stats, stop_event, deadline, mode="closed", state=None):
     """One WS bot.
 
     mode="closed": pipelined up to an in-flight window (saturates -> peak TPS).
-    mode="open":   paced at `state.interval` s between sends, arrivals independent
+    mode="open":   paced at `state.interval` s between wake-ups, arrivals independent
                    of acks, so measured latency reflects true service time. The pace
                    is read live so one bot pool can be swept across offered rates.
+                   With `state.burst > 1` each wake-up fires a tight burst of orders
+                   (microburst load) instead of a single one.
     """
     try:
         async with websockets.connect(target, ping_interval=None,
@@ -154,6 +169,7 @@ async def bot(target, stats, stop_event, deadline, mode="closed", state=None):
             while not stop_event.is_set() and time.monotonic() < deadline:
                 if mode == "closed":
                     await sem.acquire()
+                    burst = 1
                 else:                              # open-loop: pace arrivals
                     t_next += state.interval
                     delay = t_next - time.monotonic()
@@ -161,20 +177,23 @@ async def bot(target, stats, stop_event, deadline, mode="closed", state=None):
                         await asyncio.sleep(delay)
                     elif delay < -0.5:             # fell behind (saturated): resync
                         t_next = time.monotonic()  # so we don't build infinite backlog
-                    if outstanding >= MAX_OUTSTANDING:
-                        continue                   # saturated: skip (achieved<offered)
-                oid += 1
-                cur = oid
-                msg = _build_order(cur)
-                send_times[cur] = time.perf_counter_ns()
-                stats.sent += 1
-                outstanding += 1
-                try:
-                    await ws.send(msg)
-                except Exception:
-                    if mode == "closed":
-                        sem.release()
-                    raise
+                    burst = state.burst            # 1 = steady, >1 = microburst
+                # Fire one order (steady/closed) or a tight microburst of them.
+                for _ in range(burst):
+                    if mode != "closed" and outstanding >= MAX_OUTSTANDING:
+                        break                      # saturated: drop rest (achieved<offered)
+                    oid += 1
+                    cur = oid
+                    msg = _build_order(cur)
+                    send_times[cur] = time.perf_counter_ns()
+                    stats.sent += 1
+                    outstanding += 1
+                    try:
+                        await ws.send(msg)
+                    except Exception:
+                        if mode == "closed":
+                            sem.release()
+                        raise
             await asyncio.sleep(0.5)               # let in-flight acks drain
             rx.cancel()
     except Exception:
@@ -269,6 +288,38 @@ async def run_sweep(target, stats, n, r, fleet_n=1):
     await rep
 
 
+async def run_burst(target, stats, n, r, fleet_n=1):
+    """Open-loop MICROBURST sweep -> latency-vs-load curve under bursty arrivals.
+
+    Same mean offered rate as the steady sweep, but each bot fires BURST_SIZE
+    orders back-to-back then idles, so instantaneous load spikes to n*BURST_SIZE
+    per worker. The per-bot gap is sized so the mean still equals the tagged rate:
+    rate/fleet_n = (n * BURST_SIZE) / gap  =>  gap = n*BURST_SIZE / share.
+    Tagged phase="burst" so telemetry keeps it on a separate curve.
+    """
+    if not BURST_RATES:
+        return
+    state = LoadState()
+    state.burst = BURST_SIZE
+    tag = {"phase": "burst", "rate": BURST_RATES[0]}
+    stop_event = asyncio.Event()
+    deadline = time.monotonic() + len(BURST_RATES) * (BURST_STEP_SECS + 1) + 5
+    tasks = [asyncio.create_task(bot(target, stats, stop_event, deadline, "open", state))
+             for _ in range(n)]
+    rep = asyncio.create_task(reporter(stats, r, stop_event, tag))
+    for rate in BURST_RATES:
+        share = rate / float(fleet_n)
+        # Gap between this bot's bursts so the per-worker mean rate == share.
+        state.interval = (max(n, 1) * BURST_SIZE) / max(share, 1.0)
+        tag["rate"] = 0                             # settle (telemetry ignores rate=0)
+        await asyncio.sleep(1.0)
+        tag["rate"] = rate                          # tag with the AGGREGATE mean rate
+        await asyncio.sleep(BURST_STEP_SECS)
+    stop_event.set()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await rep
+
+
 async def run_load(cfg, r):
     target = cfg["target"]
     duration = int(cfg["duration"])               # used as the closed-loop phase length
@@ -276,7 +327,8 @@ async def run_load(cfg, r):
     n_sweep = min(SWEEP_BOTS, BOTS_PER_WORKER)
     stats = Stats(cfg["run_id"])
     run_id = cfg["run_id"]
-    budget = duration + len(SWEEP_RATES) * int(STEP_SECS) + 60
+    budget = (duration + len(SWEEP_RATES) * int(STEP_SECS)
+              + len(BURST_RATES) * int(BURST_STEP_SECS) + 60)
 
     # Fleet barrier: every participating replica registers, then we read the count
     # so the offered-load sweep can be split into equal shares (correct distribution
@@ -315,12 +367,15 @@ async def run_load(cfg, r):
 
     fleet_n = max(1, int(await r.scard(fleet_key)))
     print(f"[bot_fleet:{WORKER_ID}] run {run_id} -> {target} | fleet={fleet_n} | "
-          f"sweep {SWEEP_RATES} ord/s x{STEP_SECS}s ({n_sweep} bots/worker) then "
+          f"sweep {SWEEP_RATES} ord/s x{STEP_SECS}s ({n_sweep} bots/worker), "
+          f"burst {BURST_RATES} ord/s (x{BURST_SIZE}) x{BURST_STEP_SECS}s then "
           f"closed {duration}s ({n_closed} bots/worker)", flush=True)
 
-    # Sweep FIRST (near-empty book -> clean, fair latency), peak-TPS phase LAST
-    # (its saturation explodes the book, but that no longer pollutes latency).
+    # Steady sweep FIRST (near-empty book -> clean, fair latency), then the bursty
+    # sweep (same mean rates, microbursts), peak-TPS phase LAST (its saturation
+    # explodes the book, but that no longer pollutes the latency curves).
     await run_sweep(target, stats, n_sweep, r, fleet_n)
+    await run_burst(target, stats, n_sweep, r, fleet_n)
     await run_closed(target, stats, n_closed, duration, r)
 
     print(f"[bot_fleet:{WORKER_ID}] run {run_id} done: "

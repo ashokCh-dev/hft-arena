@@ -78,15 +78,20 @@ TimescaleDB (durable run history).
 
 ### bot_fleet (distributed load generator)
 - Each replica subscribes to `arena:control`. On `start`, it runs each load in
-  **two phases**:
-  - **Phase 1 — latency sweep (open-loop):** a persistent bot pool paces arrivals
-    through a series of offered rates (`SWEEP_RATES`, e.g. 5k→80k ord/s),
+  **three phases**:
+  - **Phase 1 — steady latency sweep (open-loop):** a persistent bot pool paces
+    arrivals through a series of offered rates (`SWEEP_RATES`, e.g. 5k→80k ord/s),
     independent of acks. This yields the **latency-vs-load curve**: the low-load
     points are clean service-time latency; where `achieved < offered` and latency
     explodes is the **saturation knee**. Closed-loop latency would instead be
     throughput-bound by Little's law (L = λ·W), so we never use it for latency.
     Runs **first**, on a near-empty book, so the measurement is fair across engines.
-  - **Phase 2 — throughput (closed-loop):** bots pipeline orders up to an
+  - **Phase 2 — bursty sweep (open-loop microbursts):** the same mean rates
+    (`BURST_RATES`), but each bot fires `BURST_SIZE` orders back-to-back then idles,
+    so the instantaneous rate spikes to `SWEEP_BOTS × BURST_SIZE` while the mean is
+    unchanged. Tagged `phase="burst"`, binned on a separate **burst curve**, exposing
+    the tail/jitter blow-up a steady sweep at the same mean rate hides.
+  - **Phase 3 — throughput (closed-loop):** bots pipeline orders up to an
     in-flight window, saturating the engine to find **peak TPS**. Runs last — its
     saturation explodes the order book, which no longer pollutes latency.
 - Per bot, a *sender* emits orders (paced in the sweep) and a *receiver* matches
@@ -128,6 +133,7 @@ TimescaleDB (durable run history).
 | `arena:scenario:<run>` (string, NX) | lock so one worker runs the correctness probe | bot_fleet |
 | `arena:fleet:<run>` (set) | replica barrier for coordinated 1/N load splitting | bot_fleet |
 | `arena:history` (string) | recent runs for the dashboard history panel | telemetry → orchestrator |
+| `arena:trends` (string) | per-bucket percentile/jitter trend (from the `runs_rollup` continuous aggregate) | telemetry → orchestrator |
 | Docker socket | build + run + inspect sandboxes | orchestrator → host daemon |
 
 **Two data stores, by job:**
@@ -147,6 +153,8 @@ TimescaleDB (durable run history).
   its full latency-vs-load curve as JSONB) to a `runs` hypertable on the run-done
   event. On startup it recovers the best-per-submission leaderboard from the DB, so
   a telemetry/Redis restart isn't a blank board, and `/history` exposes recent runs.
+  A **continuous aggregate** (`runs_rollup`) rolls runs into per-submission time
+  buckets for percentile-trend + latency-jitter tracking, surfaced via `/trends`.
   Persistence degrades gracefully (telemetry runs Redis-only if the DB is absent).
 
 ---
@@ -255,6 +263,7 @@ submissions, all verified green:
 | `cheater.py` — fast engine that violates price-time priority (LIFO fills) | Validation probe catches it → correctness **0.0**, score collapses |
 | `membomb.py` — allocates unbounded memory | `--memory` cap OOM-kills the container (`OOMKilled=true`); host + platform unaffected |
 | `crasher.py` — hard-exits mid-load | platform stays up; disconnects become errors → crash penalty; run still scored/persisted |
+| bursty/microburst order flow (`BURST_RATES`) | platform stays healthy and measures a separate **burst tail** (`burst_p99_us` > 0); engines are tested against bursty flow, not just steady sweeps |
 | legit engine, run after the attacks | scores correctly (**0.99**) — no contamination |
 
 > This suite caught a real bug: correctness was being transmitted to telemetry as
@@ -275,7 +284,15 @@ submissions, all verified green:
   hypertable (with curve); leaderboard recovers on restart; `/history` lists recent
   runs. Shipped for **both** deployments — docker-compose and the k8s manifests
   (`k8s/timescaledb.yaml`: Deployment + PVC + Secret), verified persisting +
-  recovering in-cluster. Next: continuous aggregates for percentile trends over time.
+  recovering in-cluster.
+- **Percentile-trend & jitter tracking over time** (✅ implemented): a TimescaleDB
+  **continuous aggregate** (`runs_rollup`, real-time aggregation on) rolls runs into
+  per-submission time buckets (`TREND_BUCKET`, default 1 min) carrying avg/max p50–p99,
+  **run-to-run jitter** (`stddev` of p50/p99 across runs), avg per-run **tail spread**
+  (p99−p50), and avg **burst p99**. Telemetry publishes the buckets to `arena:trends`
+  on each run-done; the orchestrator exposes `GET /trends` and the dashboard plots a
+  "Latency Trend & Jitter" panel. A 15-min refresh policy materializes older buckets
+  while real-time aggregation keeps the newest bucket live.
 - **Offered-load sweep + latency-vs-load curve** (✅ implemented). Scoring latency
   at a fixed reference load makes engines comparable; the curve shows each one's
   saturation knee. **Finding:** the sweep immediately exposed that the C++ engine
@@ -284,6 +301,16 @@ submissions, all verified green:
   low-latency defect the benchmark caught. Remaining overhead: the Python load
   generator still adds ms-scale scheduling jitter at the high end; next is a
   compiled / multi-process generator.
+- **Bursty / adversarial order patterns** (✅ implemented): real order flow is
+  bursty (quote storms, coordinated reactions), not a smooth trickle. After the
+  steady sweep the fleet re-offers the same mean rates as **microbursts** — each
+  bot fires `BURST_SIZE` orders back-to-back then idles, so the mean matches but the
+  instantaneous rate spikes to `SWEEP_BOTS × BURST_SIZE`. Samples are tagged
+  `phase="burst"`; telemetry bins them on a **separate burst curve** and reports
+  `burst_p99_us` / `burst_jitter_us` next to steady `p99_us` / `jitter_us`, so the
+  dashboard shows the tail/jitter blow-up a steady sweep at the same mean rate hides.
+  `tests/adversarial.sh` asserts the burst phase runs and is measured and the
+  platform stays healthy under it. Set `BURST_RATES=""` to disable.
 - **Scale-out & IaC** (✅ implemented). The bot fleet scales horizontally with
   coordinated 1/N load splitting (above). Three IaC layers ship: `docker-compose.yml`
   (single host, Swarm-compatible `deploy.replicas`), `k8s/` (kustomize: Deployments,

@@ -29,6 +29,7 @@ curl -fsS -X POST "$BASE/runs" -H 'Content-Type: application/json' \
      -d "{\"submission_id\":\"$SID\",\"bots\":80,\"duration\":4}" >/dev/null
 say "run started; waiting for a scored leaderboard row…"
 
+SCORED=
 for _ in $(seq 1 60); do
   OK=$(docker compose exec -T redis redis-cli GET arena:snapshot 2>/dev/null | python3 -c "
 import json,sys
@@ -38,10 +39,31 @@ if s:
         if r['submission']=='smoke' and r['score']>0 and r['correctness']>0.5 and len(r['curve'])>=1:
             print('OK'); break
 " 2>/dev/null)
-  if [ "$OK" = "OK" ]; then say "PASS — leaderboard scored the submission"; exit 0; fi
+  if [ "$OK" = "OK" ]; then SCORED=1; say "leaderboard scored the submission"; break; fi
+  sleep 3
+done
+[ -n "$SCORED" ] || { say "FAIL — no correctly-scored leaderboard row within timeout";
+                      docker compose logs --tail=60 || true; exit 1; }
+
+# Let the run finish (steady sweep -> burst sweep -> closed phase), then assert the
+# TimescaleDB continuous aggregate populated a percentile/jitter trend bucket AND
+# that the bursty-load phase produced a burst-tail measurement (burst_p99 > 0).
+say "waiting for run-done + persisted trend bucket (continuous aggregate + burst phase)…"
+for _ in $(seq 1 70); do
+  OK=$(curl -fsS "$BASE/trends" 2>/dev/null | python3 -c "
+import json,sys
+try: rows=json.load(sys.stdin).get('rows',[])
+except Exception: rows=[]
+for t in rows:
+    if t['submission']=='smoke' and t.get('p99_avg',0)>0 and t.get('burst_p99_avg',0)>0:
+        print('OK'); break
+" 2>/dev/null)
+  if [ "$OK" = "OK" ]; then
+    say "PASS — scored row + continuous-aggregate trend + burst-phase tail all present"; exit 0
+  fi
   sleep 3
 done
 
-say "FAIL — no correctly-scored leaderboard row within timeout"
-docker compose logs --tail=60 || true
+say "FAIL — no continuous-aggregate trend bucket (with burst tail) within timeout"
+docker compose logs --tail=80 telemetry || true
 exit 1

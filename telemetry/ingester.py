@@ -26,6 +26,7 @@ CH_RUNEVENTS = "arena:runevents"
 KEY_SNAPSHOT = "arena:snapshot"
 KEY_LB = "arena:leaderboard"        # persisted best-per-submission
 KEY_HISTORY = "arena:history"       # recent runs (for the dashboard history panel)
+KEY_TRENDS = "arena:trends"         # per-bucket percentile/jitter trend (continuous agg)
 
 RUNS = {}          # run_id -> Agg
 BEST = {}          # submission -> snapshot (live; seeded from DB on startup)
@@ -61,6 +62,7 @@ async def persist_listener(r):
         try:
             await store.persist_run(POOL, snap)
             await _refresh_history(r)
+            await _refresh_trends(r)
             print(f"[telemetry] persisted run {run_id} ({snap['submission']}, "
                   f"score={snap['score']})", flush=True)
         except Exception as exc:
@@ -70,6 +72,13 @@ async def persist_listener(r):
 async def _refresh_history(r):
     rows = await store.recent_runs(POOL, limit=20)
     await r.set(KEY_HISTORY, json.dumps({"type": "history", "runs": rows}))
+
+
+async def _refresh_trends(r):
+    """Publish the percentile/jitter trend buckets for the dashboard /trends panel."""
+    rows = await store.percentile_trends(POOL, limit=200)
+    await r.set(KEY_TRENDS, json.dumps({"type": "trends", "bucket": store.TREND_BUCKET,
+                                        "rows": rows}))
 
 
 def _apply(fields):
@@ -150,6 +159,7 @@ async def main():
         print(f"[telemetry] recovered {len(BEST)} submissions from TimescaleDB",
               flush=True)
         await _refresh_history(r)
+        await _refresh_trends(r)
     samples = sample_consumer_kafka() if TRANSPORT == "kafka" else sample_consumer(r)
     print(f"[telemetry] ingester online, transport={TRANSPORT}", flush=True)
     await asyncio.gather(control_listener(r), persist_listener(r),

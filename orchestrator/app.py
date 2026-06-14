@@ -105,6 +105,14 @@ async def history():
     return json.loads(raw) if raw else {"type": "history", "runs": []}
 
 
+@app.get("/trends")
+async def trends():
+    """Per-submission percentile + latency-jitter trend over time, from the
+    TimescaleDB `runs_rollup` continuous aggregate (maintained by telemetry)."""
+    raw = await r.get("arena:trends")
+    return json.loads(raw) if raw else {"type": "trends", "rows": []}
+
+
 class Submission(BaseModel):
     language: str = "python"
     code: str

@@ -20,6 +20,7 @@ spec:
             - { name: TARGET_TPS, value: "100000" }
             - { name: LAT_REF_US, value: "2000" }
             - { name: REF_LOAD,   value: "10000" }
+            - { name: TREND_BUCKET, value: "1 minute" }  # continuous-aggregate bucket for percentile/jitter trends
             - name: DATABASE_URL          # durable run history (TimescaleDB)
               valueFrom:
                 secretKeyRef: { name: arena-db, key: DATABASE_URL }

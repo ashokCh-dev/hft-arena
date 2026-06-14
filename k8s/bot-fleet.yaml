@@ -21,6 +21,12 @@ spec:
             - { name: SWEEP_RATES,     value: "5000,10000,20000,40000,80000" }
             - { name: STEP_SECS,       value: "4" }
             - { name: SWEEP_BOTS,      value: "120" }
+            # Bursty-load phase: same mean rates as the sweep, delivered as
+            # microbursts (tight burst + idle gap) to test engines against bursty
+            # flow, not just steady sweeps. Set BURST_RATES="" to disable.
+            - { name: BURST_RATES,     value: "10000,20000,40000" }
+            - { name: BURST_SIZE,      value: "20" }
+            - { name: BURST_STEP_SECS, value: "3" }
             # Workers self-coordinate via a Redis barrier keyed on run_id; each
             # offers 1/N of the swept load, so replicas scale aggregate throughput
             # without distorting the latency-vs-load curve.

@@ -46,7 +46,7 @@ duration, and hit **Deploy & Attack** — or click **Load Python reference** fir
 | `reference_engine_go/` | Go engine (gorilla/websocket) price-time book |
 | `reference_engine_py/` | Python price-time book (WS-JSON) — demo + correctness oracle |
 | `bot_fleet/` | asyncio pipelined load generator + correctness probe; scalable replicas |
-| `telemetry/` | Redis-Streams ingester: p50/p90/p99, TPS, correctness, score; **persists runs to TimescaleDB** |
+| `telemetry/` | Redis-Streams ingester: p50/p90/p99, TPS, correctness, score; **persists runs to TimescaleDB** + a `runs_rollup` **continuous aggregate** for percentile/jitter trends (`/trends`) |
 | `submission_templates/` | per-language sandbox build templates: **cpp, rust, go, python** |
 | `docker-compose.yml` | **Infrastructure-as-Code** (Swarm-compatible `deploy.replicas`) |
 | `k8s/` | Kubernetes manifests (kustomize): Deployments, Services, RBAC, bot-fleet **HPA** |
@@ -73,8 +73,10 @@ formula, and roadmap.
 Both reference engines run through the complete pipeline with the sandbox
 enforcing 2 pinned CPUs / 512 MB / 256 pids / read-only / all-caps-dropped.
 Each run does an **open-loop offered-load sweep** (5k→80k ord/s, clean book) for
-the latency-vs-load curve, then a **closed-loop** phase for peak TPS. Latency is
-scored at a fixed reference load (10k ord/s) so engines compare apples-to-apples:
+the latency-vs-load curve, then a **bursty microburst sweep** (same mean rates,
+delivered in bursts) that exposes tail/jitter a steady sweep hides, then a
+**closed-loop** phase for peak TPS. Latency is scored at a fixed reference load
+(10k ord/s) so engines compare apples-to-apples:
 
 | Submission | Peak TPS | Sustains | p50 @10k | p99 @10k | Correctness | Score |
 |---|---|---|---|---|---|---|
