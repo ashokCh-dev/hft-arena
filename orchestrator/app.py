@@ -46,17 +46,32 @@ r: aioredis.Redis = None
 _grpc = None          # ControlServicer when CONTROL == "grpc"
 _grpc_server = None   # keep a reference so the gRPC server isn't garbage-collected
 
+# Run queue: runs are serialized (one sandbox at a time on the pinned cores, for
+# fairness). Run requests are non-droppable, so they wait here instead of being
+# silently ignored by fleet workers that are already busy.
+RUN_QUEUE: asyncio.Queue = None
+_active = None                 # {"run_id", "submission_id"} while a run holds the lane
+_done_ev: asyncio.Event = None
+
 
 @app.on_event("startup")
 async def _startup():
-    global r, _grpc, _grpc_server
+    global r, _grpc, _grpc_server, RUN_QUEUE
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
+    RUN_QUEUE = asyncio.Queue()
+    asyncio.create_task(_run_dispatcher())
     if CONTROL == "grpc":
         import control_grpc
         _grpc = control_grpc.ControlServicer(on_done=_on_run_done)
         _grpc_server = await control_grpc.serve(_grpc)
     else:
         asyncio.create_task(_runevents_listener())
+
+
+def _signal_done(run_id):
+    """Wake the dispatcher when the active run reports done."""
+    if _active and _done_ev and _active["run_id"] == run_id:
+        _done_ev.set()
 
 
 async def _on_run_done(run_id, submission_id):
@@ -67,6 +82,7 @@ async def _on_run_done(run_id, submission_id):
     await r.publish(CH_RUNEVENTS, json.dumps(
         {"run_id": run_id, "submission_id": submission_id, "done": True}))
     await publish_event({"status": "Run complete.", "running": False})
+    _signal_done(run_id)
 
 
 async def _runevents_listener():
@@ -80,6 +96,7 @@ async def _runevents_listener():
         if ev.get("done") and ev.get("submission_id"):
             await asyncio.to_thread(sandbox.stop, ev["submission_id"])
             await publish_event({"status": "Run complete.", "running": False})
+            _signal_done(ev.get("run_id"))
 
 
 async def publish_event(payload: dict):
@@ -146,17 +163,53 @@ async def start_run(req: RunReq):
     meta = await r.hgetall(f"arena:submission:{req.submission_id}")
     if not meta:
         return {"error": "unknown submission_id"}, 404
-    name = meta.get("name", req.submission_id)
     run_id = uuid.uuid4().hex[:8]
+    name = meta.get("name", req.submission_id)
+    ahead = RUN_QUEUE.qsize() + (1 if _active else 0)
+    await RUN_QUEUE.put({"run_id": run_id, "req": req, "name": name,
+                         "language": meta.get("language", "python")})
+    if ahead:
+        await publish_event({"status": f"Queued {name} — {ahead} run(s) ahead."})
+    return {"run_id": run_id, "queued_behind": ahead,
+            "bots": req.bots, "duration": req.duration}
 
-    lang = meta.get("language", "python")
+
+async def _run_dispatcher():
+    """Pop queued runs one at a time: launch the sandbox, start the fleet, then
+    hold the lane until the fleet leader reports done (with a generous timeout as
+    the safety net in case a worker dies mid-run — the open-loop sweep makes run
+    length dynamic)."""
+    global _active, _done_ev
+    while True:
+        job = await RUN_QUEUE.get()
+        _active = {"run_id": job["run_id"], "submission_id": job["req"].submission_id}
+        _done_ev = asyncio.Event()
+        try:
+            if await _execute_run(job):
+                try:
+                    await asyncio.wait_for(_done_ev.wait(),
+                                           timeout=job["req"].duration + 180)
+                except asyncio.TimeoutError:
+                    await asyncio.to_thread(sandbox.stop, job["req"].submission_id)
+                    await publish_event({"status": "Run timed out — sandbox stopped.",
+                                         "running": False})
+        except Exception as exc:
+            await publish_event({"status": f"Run failed: {exc}", "running": False})
+        finally:
+            _active = None
+
+
+async def _execute_run(job) -> bool:
+    """Launch + health-check the sandbox, then broadcast the start command."""
+    req, run_id, name = job["req"], job["run_id"], job["name"]
     await publish_event({"status": f"Deploying sandbox for {name}…"})
-    await asyncio.to_thread(sandbox.launch, req.submission_id, lang)
+    await asyncio.to_thread(sandbox.launch, req.submission_id, job["language"])
     healthy = await asyncio.to_thread(sandbox.wait_healthy, req.submission_id)
     if not healthy:
         tail = await asyncio.to_thread(sandbox.logs, req.submission_id)
+        await asyncio.to_thread(sandbox.stop, req.submission_id)
         await publish_event({"status": f"Sandbox failed health check. logs: {tail[:200]}"})
-        return {"error": "sandbox unhealthy"}, 500
+        return False
 
     target = f"ws://{sandbox.target_host(req.submission_id)}:9000"
     # Tell telemetry which run/submission is live, then start the bot fleet.
@@ -175,16 +228,7 @@ async def start_run(req: RunReq):
             cmd="start", run_id=run_id, submission=name,
             submission_id=req.submission_id, target=target,
             bots=req.bots, duration=req.duration))
-    # Primary stop is the fleet's run-done event; this is a generous safety net
-    # in case a worker dies mid-run (the open-loop sweep makes run length dynamic).
-    asyncio.create_task(_auto_stop(req.submission_id, req.duration + 180, name))
-    return {"run_id": run_id, "target": target, "bots": req.bots,
-            "duration": req.duration}
-
-
-async def _auto_stop(submission_id: str, after: int, name: str):
-    await asyncio.sleep(after)
-    await asyncio.to_thread(sandbox.stop, submission_id)
+    return True
 
 
 @app.post("/stop", dependencies=[Depends(require_key)])
